@@ -39,3 +39,4 @@ if token:
         if code == 200:
             for e in json.loads(body)["data"][-3:]:
                 print("  ep", e["id"], e.get("episode_number"), e.get("sequence_number"), e.get("slug_title"), e.get("audio_locale"), e.get("versions") and [(v["audio_locale"], v["guid"]) for v in e["versions"]][:3])
+# rodada 2

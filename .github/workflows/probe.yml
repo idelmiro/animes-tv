@@ -3,9 +3,17 @@ on:
   workflow_dispatch:
   push:
     paths: [tools/probe_cr.py]
+permissions:
+  contents: write
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 tools/probe_cr.py
+      - run: python3 tools/probe_cr.py > /tmp/probe.txt 2>&1 || true
+      - run: |
+          git config user.name probe; git config user.email probe@users.noreply.github.com
+          git checkout --orphan probe-results
+          git rm -rfq .
+          cp /tmp/probe.txt probe.txt
+          git add probe.txt; git commit -qm "resultado"; git push -f origin probe-results
