@@ -406,6 +406,7 @@ class MainActivity : Activity() {
             }
             appendLine("Forma de abrir anime: ${prefs.openMethod ?: CrunchyrollLauncher.DEFAULT_SERIES_METHOD + " (padrão)"}")
             appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: "ainda não testada"}")
+            appendLine("Códigos de episódio vêm de: ${CrunchyrollApi.lastSource.ifEmpty { "nenhuma busca ainda" }}")
             appendLine("Favoritos: ${prefs.favorites.size}")
             appendLine("Tela inicial: ${prefs.homeStatus}")
             if (loadError != null) appendLine("Último erro de carregamento: $loadError")
