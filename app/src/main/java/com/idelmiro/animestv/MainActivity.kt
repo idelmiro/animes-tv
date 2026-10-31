@@ -285,6 +285,11 @@ class MainActivity : Activity() {
             appendLine("Quem abre links de série do Crunchyroll:")
             appendLine(if (handlers.isEmpty()) "  ninguém" else handlers.joinToString("\n") { "  $it" })
             appendLine()
+            for (p in pkgs) {
+                appendLine("Links aceitos por $p:")
+                append(ManifestReader.report(this@MainActivity, p))
+                appendLine()
+            }
             appendLine("Favoritos: ${prefs.favorites.size}")
             appendLine("Tela inicial: ${prefs.homeStatus}")
             if (loadError != null) appendLine("Último erro de carregamento: $loadError")
