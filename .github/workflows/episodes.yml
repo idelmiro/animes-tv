@@ -1,0 +1,27 @@
+name: Atualizar episódios
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [tools/episodes.py, .github/workflows/episodes.yml]
+permissions:
+  contents: write
+concurrency: episodes
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/episodes.py
+      - run: |
+          git config user.name "animes-tv bot"; git config user.email "bot@users.noreply.github.com"
+          mv episodes.json /tmp/episodes.json
+          git fetch origin data || true
+          git checkout -B data origin/data 2>/dev/null || git checkout --orphan data
+          git rm -rfq . 2>/dev/null || true
+          cp /tmp/episodes.json episodes.json
+          git add episodes.json
+          git commit -qm "Episódios atualizados" || exit 0
+          git push -f origin data
