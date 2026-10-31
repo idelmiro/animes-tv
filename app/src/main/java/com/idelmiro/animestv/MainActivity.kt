@@ -49,6 +49,10 @@ class MainActivity : Activity() {
     private var loading: Job? = null
     private var loadError: String? = null
 
+    // Teste de formas de abrir o Crunchyroll: anime em teste e índice da forma testada.
+    private var testAiring: Airing? = null
+    private var testIndex = -1
+
     private val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
     private val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
 
@@ -86,6 +90,50 @@ class MainActivity : Activity() {
         load()
         HomeWorker.schedule(this)
         HomeWorker.runNow(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val a = testAiring ?: return
+        val url = a.anime.crunchyrollUrl ?: return
+        val variants = CrunchyrollLauncher.variants(this, url)
+        val idx = testIndex
+        val v = variants.getOrNull(idx) ?: return
+        testAiring = null
+        val hasNext = idx + 1 < variants.size
+        val b = dialog().setTitle("Teste ${idx + 1} de ${variants.size}")
+            .setMessage("Usei: ${v.label}\n\nO Crunchyroll abriu a página de \"${a.anime.title}\"?")
+            .setPositiveButton("Sim, abriu o anime") { _, _ ->
+                prefs.openMethod = v.key
+                toast("Pronto! A partir de agora os animes abrem desse jeito.")
+            }
+        if (hasNext) b.setNegativeButton("Não, testar a próxima") { _, _ -> runTest(a, idx + 1) }
+        else b.setNegativeButton("Não (era a última)") { _, _ ->
+            toast("Nenhuma forma funcionou. Me conte para eu tentar outras.")
+        }
+        b.setNeutralButton("Parar", null).show()
+    }
+
+    private fun runTest(a: Airing, index: Int) {
+        val url = a.anime.crunchyrollUrl
+        if (url == null) {
+            toast("Este anime não tem link do Crunchyroll. Teste com outro.")
+            return
+        }
+        val variants = CrunchyrollLauncher.variants(this, url)
+        if (variants.isEmpty()) {
+            toast("Não encontrei o app do Crunchyroll.")
+            return
+        }
+        val v = variants.getOrNull(index) ?: return
+        testAiring = a
+        testIndex = index
+        if (!CrunchyrollLauncher.launch(this, v)) {
+            // O Android recusou na hora: pula direto para a próxima.
+            testAiring = null
+            if (index + 1 < variants.size) runTest(a, index + 1)
+            else toast("O Crunchyroll recusou todas as formas.")
+        }
     }
 
     override fun onDestroy() {
@@ -214,7 +262,8 @@ class MainActivity : Activity() {
         val fav = prefs.isFav(a.anime.id)
         val options = arrayOf(
             "Abrir no Crunchyroll",
-            if (fav) "Remover dos favoritos" else "Adicionar aos favoritos"
+            if (fav) "Remover dos favoritos" else "Adicionar aos favoritos",
+            "Testar formas de abrir no Crunchyroll"
         )
         dialog().setTitle("${a.anime.title} — Ep. ${a.episode}")
             .setItems(options) { _, which ->
@@ -226,6 +275,7 @@ class MainActivity : Activity() {
                         if (prefs.onlyFavorites) showDay() else adapter.notifyDataSetChanged()
                         HomeWorker.runNow(this)
                     }
+                    2 -> runTest(a, 0)
                 }
             }.show()
     }
@@ -290,6 +340,7 @@ class MainActivity : Activity() {
                 append(ManifestReader.report(this@MainActivity, p))
                 appendLine()
             }
+            appendLine("Forma de abrir escolhida: ${prefs.openMethod ?: "nenhuma ainda"}")
             appendLine("Favoritos: ${prefs.favorites.size}")
             appendLine("Tela inicial: ${prefs.homeStatus}")
             if (loadError != null) appendLine("Último erro de carregamento: $loadError")
