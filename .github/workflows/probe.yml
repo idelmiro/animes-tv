@@ -1,0 +1,11 @@
+name: Teste API Crunchyroll
+on:
+  workflow_dispatch:
+  push:
+    paths: [tools/probe_cr.py]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/probe_cr.py
