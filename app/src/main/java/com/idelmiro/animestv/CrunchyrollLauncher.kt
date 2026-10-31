@@ -13,6 +13,9 @@ object CrunchyrollLauncher {
     /** Forma de abrir a série que funcionou no teste da TV Semp (crunchyroll://series/ID). */
     const val DEFAULT_SERIES_METHOD = "cr-series"
 
+    /** Forma de abrir episódio que deu play automático no teste (crunchyroll://episode/ID). */
+    const val DEFAULT_EPISODE_METHOD = "ep-episode"
+
     class Variant(val key: String, val label: String, val intent: Intent)
 
     fun installedPackages(ctx: Context): List<String> =
@@ -109,8 +112,8 @@ object CrunchyrollLauncher {
      * senão abre a página do anime.
      */
     fun openEpisode(ctx: Context, episodeId: String?, slug: String, seriesUrl: String?): String? {
-        val method = Prefs(ctx).episodeMethod
-        if (episodeId != null && method != null) {
+        val method = Prefs(ctx).episodeMethod ?: DEFAULT_EPISODE_METHOD
+        if (episodeId != null) {
             val v = episodeVariants(ctx, episodeId, slug).firstOrNull { it.key == method }
             if (v != null && launch(ctx, v)) return null
         }

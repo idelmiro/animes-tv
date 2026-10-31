@@ -2,6 +2,7 @@ package com.idelmiro.animestv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.text.SpannableStringBuilder
@@ -25,6 +26,8 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -49,15 +52,9 @@ class MainActivity : Activity() {
     private var loading: Job? = null
     private var loadError: String? = null
 
-    // Teste guiado de formas de abrir o Crunchyroll.
-    private class TestRun(
-        val variants: List<CrunchyrollLauncher.Variant>,
-        val question: String,
-        val onSuccess: (CrunchyrollLauncher.Variant) -> Unit
-    )
-    private var test: TestRun? = null
-    private var testIndex = -1
-    private var testWaiting = false
+    // Teste guiado de formas de abrir o Crunchyroll. Fica salvo nas preferências porque
+    // o Android pode fechar este app enquanto o Crunchyroll toca o vídeo.
+    private class TestRun(val kind: String, val variants: List<CrunchyrollLauncher.Variant>, val question: String)
 
     private val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
     private val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
@@ -100,15 +97,36 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (!testWaiting) return
-        testWaiting = false
-        val t = test ?: return
-        val idx = testIndex
+        val saved = prefs.pendingTest ?: return
+        prefs.pendingTest = null
+        try {
+            val o = JSONObject(saved)
+            val arr = o.getJSONArray("variants")
+            val variants = (0 until arr.length()).map { i ->
+                val v = arr.getJSONObject(i)
+                CrunchyrollLauncher.Variant(v.getString("key"), v.getString("label"),
+                    Intent.parseUri(v.getString("uri"), Intent.URI_INTENT_SCHEME))
+            }
+            askTestResult(TestRun(o.getString("kind"), variants, o.getString("question")), o.getInt("index"))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun askTestResult(t: TestRun, idx: Int) {
         val v = t.variants.getOrNull(idx) ?: return
         val hasNext = idx + 1 < t.variants.size
         val b = dialog().setTitle("Teste ${idx + 1} de ${t.variants.size}")
             .setMessage("Usei: ${v.label}\n\n${t.question}")
-            .setPositiveButton("Sim, funcionou") { _, _ -> t.onSuccess(v) }
+            .setPositiveButton("Sim, funcionou") { _, _ ->
+                if (t.kind == "ep") {
+                    prefs.episodeMethod = v.key
+                    HomeWorker.runNow(this)
+                    toast("Pronto! A partir de agora \"Assistir\" vai direto ao episódio.")
+                } else {
+                    prefs.openMethod = v.key
+                    toast("Pronto! A partir de agora os animes abrem desse jeito.")
+                }
+            }
         if (hasNext) b.setNegativeButton("Não, testar a próxima") { _, _ -> runTest(t, idx + 1) }
         else b.setNegativeButton("Não (era a última)") { _, _ ->
             toast("Nenhuma forma funcionou. Me conte o que aconteceu em cada uma.")
@@ -122,12 +140,15 @@ class MainActivity : Activity() {
             return
         }
         val v = t.variants.getOrNull(index) ?: return
-        test = t
-        testIndex = index
-        testWaiting = true
+        val arr = JSONArray()
+        for (x in t.variants) {
+            arr.put(JSONObject().put("key", x.key).put("label", x.label).put("uri", x.intent.toUri(Intent.URI_INTENT_SCHEME)))
+        }
+        prefs.pendingTest = JSONObject().put("kind", t.kind).put("question", t.question)
+            .put("index", index).put("variants", arr).toString()
         if (!CrunchyrollLauncher.launch(this, v)) {
             // O Android recusou na hora: pula direto para a próxima.
-            testWaiting = false
+            prefs.pendingTest = null
             if (index + 1 < t.variants.size) runTest(t, index + 1)
             else toast("O Crunchyroll recusou todas as formas.")
         }
@@ -157,10 +178,6 @@ class MainActivity : Activity() {
     }
 
     private fun watchEpisode(a: Airing) {
-        if (prefs.episodeMethod == null) {
-            testEpisode(a)
-            return
-        }
         withEpisode(a) { ep ->
             CrunchyrollLauncher.openEpisode(this, ep.id, ep.slug, a.anime.crunchyrollUrl)?.let { toast(it) }
         }
@@ -169,13 +186,10 @@ class MainActivity : Activity() {
     private fun testEpisode(a: Airing) {
         withEpisode(a) { ep ->
             val t = TestRun(
+                "ep",
                 CrunchyrollLauncher.episodeVariants(this, ep.id, ep.slug),
                 "O Crunchyroll abriu o episódio ${ep.number} de \"${a.anime.title}\" (tocando ou pronto para tocar)?"
-            ) { v ->
-                prefs.episodeMethod = v.key
-                HomeWorker.runNow(this)
-                toast("Pronto! A partir de agora \"Assistir\" vai direto ao episódio.")
-            }
+            )
             runTest(t, 0)
         }
     }
@@ -187,12 +201,10 @@ class MainActivity : Activity() {
             return
         }
         val t = TestRun(
+            "series",
             CrunchyrollLauncher.seriesVariants(this, url),
             "O Crunchyroll abriu a página de \"${a.anime.title}\"?"
-        ) { v ->
-            prefs.openMethod = v.key
-            toast("Pronto! A partir de agora os animes abrem desse jeito.")
-        }
+        )
         runTest(t, 0)
     }
 
@@ -405,7 +417,7 @@ class MainActivity : Activity() {
                 appendLine()
             }
             appendLine("Forma de abrir anime: ${prefs.openMethod ?: CrunchyrollLauncher.DEFAULT_SERIES_METHOD + " (padrão)"}")
-            appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: "ainda não testada"}")
+            appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: CrunchyrollLauncher.DEFAULT_EPISODE_METHOD + " (padrão)"}")
             appendLine("Códigos de episódio vêm de: ${CrunchyrollApi.lastSource.ifEmpty { "nenhuma busca ainda" }}")
             appendLine("Favoritos: ${prefs.favorites.size}")
             appendLine("Tela inicial: ${prefs.homeStatus}")

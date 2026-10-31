@@ -52,6 +52,10 @@ class Prefs(context: Context) {
         get() = sp.getString("episodeMethod", null)
         set(v) = sp.edit().putString("episodeMethod", v).apply()
 
+    var pendingTest: String?
+        get() = sp.getString("pendingTest", null)
+        set(v) = sp.edit().putString("pendingTest", v).commit().let { }
+
     var homeStatus: String
         get() = sp.getString("homeStatus", "ainda não executado") ?: ""
         set(v) = sp.edit().putString("homeStatus", v).apply()
