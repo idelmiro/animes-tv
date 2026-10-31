@@ -49,9 +49,15 @@ class MainActivity : Activity() {
     private var loading: Job? = null
     private var loadError: String? = null
 
-    // Teste de formas de abrir o Crunchyroll: anime em teste e índice da forma testada.
-    private var testAiring: Airing? = null
+    // Teste guiado de formas de abrir o Crunchyroll.
+    private class TestRun(
+        val variants: List<CrunchyrollLauncher.Variant>,
+        val question: String,
+        val onSuccess: (CrunchyrollLauncher.Variant) -> Unit
+    )
+    private var test: TestRun? = null
     private var testIndex = -1
+    private var testWaiting = false
 
     private val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
     private val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
@@ -94,46 +100,100 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        val a = testAiring ?: return
-        val url = a.anime.crunchyrollUrl ?: return
-        val variants = CrunchyrollLauncher.variants(this, url)
+        if (!testWaiting) return
+        testWaiting = false
+        val t = test ?: return
         val idx = testIndex
-        val v = variants.getOrNull(idx) ?: return
-        testAiring = null
-        val hasNext = idx + 1 < variants.size
-        val b = dialog().setTitle("Teste ${idx + 1} de ${variants.size}")
-            .setMessage("Usei: ${v.label}\n\nO Crunchyroll abriu a página de \"${a.anime.title}\"?")
-            .setPositiveButton("Sim, abriu o anime") { _, _ ->
-                prefs.openMethod = v.key
-                toast("Pronto! A partir de agora os animes abrem desse jeito.")
-            }
-        if (hasNext) b.setNegativeButton("Não, testar a próxima") { _, _ -> runTest(a, idx + 1) }
+        val v = t.variants.getOrNull(idx) ?: return
+        val hasNext = idx + 1 < t.variants.size
+        val b = dialog().setTitle("Teste ${idx + 1} de ${t.variants.size}")
+            .setMessage("Usei: ${v.label}\n\n${t.question}")
+            .setPositiveButton("Sim, funcionou") { _, _ -> t.onSuccess(v) }
+        if (hasNext) b.setNegativeButton("Não, testar a próxima") { _, _ -> runTest(t, idx + 1) }
         else b.setNegativeButton("Não (era a última)") { _, _ ->
-            toast("Nenhuma forma funcionou. Me conte para eu tentar outras.")
+            toast("Nenhuma forma funcionou. Me conte o que aconteceu em cada uma.")
         }
         b.setNeutralButton("Parar", null).show()
     }
 
-    private fun runTest(a: Airing, index: Int) {
+    private fun runTest(t: TestRun, index: Int) {
+        if (t.variants.isEmpty()) {
+            toast("Não encontrei o app do Crunchyroll.")
+            return
+        }
+        val v = t.variants.getOrNull(index) ?: return
+        test = t
+        testIndex = index
+        testWaiting = true
+        if (!CrunchyrollLauncher.launch(this, v)) {
+            // O Android recusou na hora: pula direto para a próxima.
+            testWaiting = false
+            if (index + 1 < t.variants.size) runTest(t, index + 1)
+            else toast("O Crunchyroll recusou todas as formas.")
+        }
+    }
+
+    /** Busca o código do episódio no Crunchyroll e chama [then] com ele. */
+    private fun withEpisode(a: Airing, then: (CrunchyrollApi.Episode) -> Unit) {
+        val sid = CrunchyrollApi.seriesIdFromUrl(a.anime.crunchyrollUrl)
+        if (sid == null) {
+            toast("Este anime não tem link do Crunchyroll.")
+            return
+        }
+        toast("Procurando o episódio ${a.episode} no Crunchyroll…")
+        scope.launch {
+            try {
+                val ep = withContext(Dispatchers.IO) { CrunchyrollApi.findEpisode(sid, a.episode) }
+                then(ep)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dialog().setTitle("Episódio").setMessage("Não consegui achar o episódio: ${e.message}\n\nVou abrir a página do anime.")
+                    .setPositiveButton("OK") { _, _ ->
+                        CrunchyrollLauncher.openSeries(this@MainActivity, a.anime.crunchyrollUrl)?.let { toast(it) }
+                    }.show()
+            }
+        }
+    }
+
+    private fun watchEpisode(a: Airing) {
+        if (prefs.episodeMethod == null) {
+            testEpisode(a)
+            return
+        }
+        withEpisode(a) { ep ->
+            CrunchyrollLauncher.openEpisode(this, ep.id, ep.slug, a.anime.crunchyrollUrl)?.let { toast(it) }
+        }
+    }
+
+    private fun testEpisode(a: Airing) {
+        withEpisode(a) { ep ->
+            val t = TestRun(
+                CrunchyrollLauncher.episodeVariants(this, ep.id, ep.slug),
+                "O Crunchyroll abriu o episódio ${ep.number} de \"${a.anime.title}\" (tocando ou pronto para tocar)?"
+            ) { v ->
+                prefs.episodeMethod = v.key
+                HomeWorker.runNow(this)
+                toast("Pronto! A partir de agora \"Assistir\" vai direto ao episódio.")
+            }
+            runTest(t, 0)
+        }
+    }
+
+    private fun testSeries(a: Airing) {
         val url = a.anime.crunchyrollUrl
         if (url == null) {
             toast("Este anime não tem link do Crunchyroll. Teste com outro.")
             return
         }
-        val variants = CrunchyrollLauncher.variants(this, url)
-        if (variants.isEmpty()) {
-            toast("Não encontrei o app do Crunchyroll.")
-            return
+        val t = TestRun(
+            CrunchyrollLauncher.seriesVariants(this, url),
+            "O Crunchyroll abriu a página de \"${a.anime.title}\"?"
+        ) { v ->
+            prefs.openMethod = v.key
+            toast("Pronto! A partir de agora os animes abrem desse jeito.")
         }
-        val v = variants.getOrNull(index) ?: return
-        testAiring = a
-        testIndex = index
-        if (!CrunchyrollLauncher.launch(this, v)) {
-            // O Android recusou na hora: pula direto para a próxima.
-            testAiring = null
-            if (index + 1 < variants.size) runTest(a, index + 1)
-            else toast("O Crunchyroll recusou todas as formas.")
-        }
+        runTest(t, 0)
     }
 
     override fun onDestroy() {
@@ -261,21 +321,25 @@ class MainActivity : Activity() {
     private fun onAnimeClick(a: Airing) {
         val fav = prefs.isFav(a.anime.id)
         val options = arrayOf(
-            "Abrir no Crunchyroll",
+            "▶ Assistir episódio ${a.episode}",
+            "Abrir a página do anime",
             if (fav) "Remover dos favoritos" else "Adicionar aos favoritos",
-            "Testar formas de abrir no Crunchyroll"
+            "Testar formas de abrir o episódio",
+            "Testar formas de abrir a página do anime"
         )
         dialog().setTitle("${a.anime.title} — Ep. ${a.episode}")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> CrunchyrollLauncher.open(this, a.anime.crunchyrollUrl)?.let { toast(it) }
-                    1 -> {
+                    0 -> watchEpisode(a)
+                    1 -> CrunchyrollLauncher.openSeries(this, a.anime.crunchyrollUrl)?.let { toast(it) }
+                    2 -> {
                         prefs.toggleFav(a.anime.id)
                         updateDays()
                         if (prefs.onlyFavorites) showDay() else adapter.notifyDataSetChanged()
                         HomeWorker.runNow(this)
                     }
-                    2 -> runTest(a, 0)
+                    3 -> testEpisode(a)
+                    4 -> testSeries(a)
                 }
             }.show()
     }
@@ -340,7 +404,8 @@ class MainActivity : Activity() {
                 append(ManifestReader.report(this@MainActivity, p))
                 appendLine()
             }
-            appendLine("Forma de abrir escolhida: ${prefs.openMethod ?: "nenhuma ainda"}")
+            appendLine("Forma de abrir anime: ${prefs.openMethod ?: CrunchyrollLauncher.DEFAULT_SERIES_METHOD + " (padrão)"}")
+            appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: "ainda não testada"}")
             appendLine("Favoritos: ${prefs.favorites.size}")
             appendLine("Tela inicial: ${prefs.homeStatus}")
             if (loadError != null) appendLine("Último erro de carregamento: $loadError")

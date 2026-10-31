@@ -37,9 +37,17 @@ object HomeScreen {
         var lastError = ""
         for (a in airings) {
             try {
+                val ep = try {
+                    CrunchyrollApi.seriesIdFromUrl(a.anime.crunchyrollUrl)?.let { CrunchyrollApi.findEpisode(it, a.episode) }
+                } catch (_: Exception) {
+                    null
+                }
                 val launch = Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("animestv://open?id=${a.anime.id}&url=" + Uri.encode(a.anime.crunchyrollUrl ?: ""))
+                    Uri.parse(
+                        "animestv://open?id=${a.anime.id}&url=" + Uri.encode(a.anime.crunchyrollUrl ?: "") +
+                            "&ep=" + Uri.encode(ep?.id ?: "") + "&slug=" + Uri.encode(ep?.slug ?: "")
+                    )
                 ).setPackage(ctx.packageName)
 
                 val b = WatchNextProgram.Builder()

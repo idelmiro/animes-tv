@@ -117,8 +117,11 @@ object Updater {
 class DeepLinkActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val url = intent?.data?.getQueryParameter("url")?.takeIf { it.isNotBlank() }
-        val msg = CrunchyrollLauncher.open(this, url)
+        val data = intent?.data
+        val url = data?.getQueryParameter("url")?.takeIf { it.isNotBlank() }
+        val ep = data?.getQueryParameter("ep")?.takeIf { it.isNotBlank() }
+        val slug = data?.getQueryParameter("slug").orEmpty()
+        val msg = CrunchyrollLauncher.openEpisode(this, ep, slug, url)
         if (msg != null) Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
         finish()
     }
