@@ -362,7 +362,7 @@ class MainActivity : Activity() {
         val options = arrayOf(
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
             "Só animes com link do Crunchyroll: ${if (prefs.onlyCrunchyroll) "Sim" else "Não"}",
-            "Publicar episódios de hoje na tela inicial agora",
+            "Atualizar o canal \"Animes de hoje\" agora",
             "Diagnóstico",
             "Verificar atualização (versão ${BuildConfig.VERSION_CODE})"
         )

@@ -60,6 +60,14 @@ class Prefs(context: Context) {
         get() = sp.getString("homeStatus", "ainda não executado") ?: ""
         set(v) = sp.edit().putString("homeStatus", v).apply()
 
+    var channelId: Long
+        get() = sp.getLong("channelId", -1L)
+        set(v) = sp.edit().putLong("channelId", v).apply()
+
+    var programIds: Set<String>
+        get() = sp.getStringSet("programIds", emptySet()) ?: emptySet()
+        set(v) = sp.edit().putStringSet("programIds", v).apply()
+
     var homeIds: Set<String>
         get() = sp.getStringSet("homeIds", emptySet()) ?: emptySet()
         set(v) = sp.edit().putStringSet("homeIds", v).apply()
