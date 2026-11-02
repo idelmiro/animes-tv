@@ -62,21 +62,35 @@ object CrunchyrollApi {
         }
     }
 
-    private fun findInList(seriesId: String, number: Int): Episode {
+    private fun loadList(): JSONObject {
         val now = System.currentTimeMillis()
-        val data = list?.takeIf { now - listTime < 30 * 60 * 1000 } ?: run {
-            val conn = URL(LIST_URL).openConnection() as HttpURLConnection
-            try {
-                conn.connectTimeout = 15000
-                conn.readTimeout = 20000
-                val code = conn.responseCode
-                if (code == 404) throw Exception("lista não acessível (o repositório no GitHub precisa ser público)")
-                if (code != 200) throw Exception("erro $code")
-                JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).also { list = it; listTime = now }
-            } finally {
-                conn.disconnect()
-            }
+        list?.takeIf { now - listTime < 30 * 60 * 1000 }?.let { return it }
+        val conn = URL(LIST_URL).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 15000
+            conn.readTimeout = 20000
+            val code = conn.responseCode
+            if (code == 404) throw Exception("lista não acessível (o repositório no GitHub precisa ser público)")
+            if (code != 200) throw Exception("erro $code")
+            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).also { list = it; listTime = now }
+        } finally {
+            conn.disconnect()
         }
+    }
+
+    /** Arte horizontal (16:9) da série no Crunchyroll, vinda da lista do GitHub. */
+    @Synchronized
+    fun wideImage(seriesId: String?): String? {
+        if (seriesId == null) return null
+        return try {
+            loadList().optJSONObject("images")?.optString(seriesId)?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun findInList(seriesId: String, number: Int): Episode {
+        val data = loadList()
         val e = data.optJSONObject("episodes")?.optJSONObject("$seriesId:$number")
             ?: data.optJSONObject("latest")?.optJSONObject(seriesId)
             ?: throw Exception("episódio ainda não está na lista (ela é atualizada a cada 2 horas)")

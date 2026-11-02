@@ -10,7 +10,8 @@ data class Anime(
     val id: Int,
     val title: String,
     val cover: String?,
-    val crunchyrollUrl: String?
+    val crunchyrollUrl: String?,
+    val banner: String? = null
 )
 
 /** Um episódio na grade. [airingAt] é o horário de exibição no Japão (segundos desde 1970). */
@@ -90,6 +91,7 @@ object AniList {
                 isAdult
                 title { romaji english }
                 coverImage { large }
+                bannerImage
                 externalLinks { site url }
               }
             }
@@ -133,7 +135,7 @@ object AniList {
             }
         }
         return Airing(
-            anime = Anime(media.getInt("id"), title, cover, cr),
+            anime = Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage")),
             episode = o.optInt("episode"),
             airingAt = o.getLong("airingAt")
         )

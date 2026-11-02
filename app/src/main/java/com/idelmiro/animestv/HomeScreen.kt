@@ -106,7 +106,13 @@ object HomeScreen {
                     .setIntentUri(launchUri(ctx, it))
                     .setInternalProviderId("${a.anime.id}-${a.episode}")
                     .setWeight(items.size - weight)
-                a.anime.cover?.let {
+                // Capa horizontal, como a do Crunchyroll; se não houver, usa o pôster em pé.
+                val wide = CrunchyrollApi.wideImage(CrunchyrollApi.seriesIdFromUrl(a.anime.crunchyrollUrl))
+                    ?: a.anime.banner
+                if (wide != null) {
+                    b.setPosterArtUri(Uri.parse(wide))
+                        .setPosterArtAspectRatio(TvContractCompat.PreviewProgramColumns.ASPECT_RATIO_16_9)
+                } else a.anime.cover?.let {
                     b.setPosterArtUri(Uri.parse(it))
                         .setPosterArtAspectRatio(TvContractCompat.PreviewProgramColumns.ASPECT_RATIO_2_3)
                 }
