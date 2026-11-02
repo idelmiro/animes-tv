@@ -43,10 +43,25 @@ def ep_id(e):
             return v["guid"]
     return e["id"]
 
-out = {"episodes": {}, "latest": {}}
+out = {"episodes": {}, "latest": {}, "images": {}}
 errors = 0
+def pick_wide(series):
+    imgs = (series.get("images") or {}).get("poster_wide") or []
+    flat = [i for group in imgs for i in (group if isinstance(group, list) else [group])]
+    if not flat:
+        return None
+    ok = [i for i in flat if i.get("width", 0) <= 1280] or flat
+    return max(ok, key=lambda i: i.get("width", 0))["source"]
+
 for sid, nums in wanted.items():
     try:
+        try:
+            info = http(f"https://www.crunchyroll.com/content/v2/cms/series/{sid}?locale=pt-BR", headers=H)["data"][0]
+            wide = pick_wide(info)
+            if wide:
+                out["images"][sid] = wide
+        except Exception as ex:
+            print("imagem", sid, ex)
         seasons = http(f"https://www.crunchyroll.com/content/v2/cms/series/{sid}/seasons?locale=pt-BR", headers=H)["data"]
         seasons = [s for s in seasons if ja(s)] or seasons
         seasons.sort(key=lambda s: s.get("season_sequence_number") or s.get("season_number") or 0)
@@ -69,5 +84,5 @@ for sid, nums in wanted.items():
         print("erro", sid, ex)
 
 out["updated"] = datetime.datetime.utcnow().isoformat() + "Z"
-print(f"{len(wanted)} séries, {len(out['episodes'])} episódios, {errors} erros")
+print(f"{len(wanted)} séries, {len(out['episodes'])} episódios, {len(out['images'])} imagens, {errors} erros")
 json.dump(out, open("episodes.json", "w"), ensure_ascii=False)
