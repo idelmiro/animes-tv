@@ -58,22 +58,34 @@ object Nyaa {
      * Procura o [episode] do anime pelos [names] (o primeiro é o título principal).
      * Roda em thread de fundo (faz várias consultas de rede).
      */
-    fun search(names: List<String>, episode: Int): List<Result> {
+    fun search(names: List<String>, episode: Int, progress: (String) -> Unit = {}): List<Result> {
         val queries = names.map { cleanName(it) }.filter { it.length >= 3 && isLatin(it) }.distinct().take(3)
+        if (queries.isEmpty()) throw Exception("o anime não tem um nome em letras latinas para buscar")
         val found = LinkedHashMap<String, Result>()
         var lastError: Exception? = null
         var checks = 0
 
-        for (name in queries) {
+        fun status(step: String) {
+            val n = found.size
+            progress("$step\n\n" + if (n == 0) "Nenhum lançamento confirmado ainda." else "$n lançamento(s) com PT-BR encontrado(s).")
+        }
+
+        for ((qi, name) in queries.withIndex()) {
+            val which = if (queries.size > 1) " (nome ${qi + 1} de ${queries.size})" else ""
             try {
                 // 1) Com termos de PT-BR na busca: o título já confirma o idioma.
-                for (it in rss("$name $PTBR_QUERY")) {
+                status("Buscando \"$name\" com legenda PT-BR no Nyaa$which…")
+                val withPt = rss("$name $PTBR_QUERY")
+                for (it in withPt) {
                     if (it.infoHash in found) continue
                     val batch = matchEpisode(it.title, episode) ?: continue
                     if (PTBR.containsMatchIn(it.title)) found[it.infoHash] = it.toResult("título", batch)
                 }
                 // 2) Só com o nome: confere a descrição dos que não dizem o idioma no título.
-                for (it in rss(name)) {
+                Thread.sleep(PAUSE_MS)
+                status("Buscando outros lançamentos de \"$name\"$which…")
+                val all = rss(name)
+                for (it in all) {
                     if (it.infoHash in found) continue
                     val batch = matchEpisode(it.title, episode) ?: continue
                     if (PTBR.containsMatchIn(it.title)) {
@@ -82,6 +94,7 @@ object Nyaa {
                     }
                     if (checks >= MAX_DESCRIPTION_CHECKS) continue
                     checks++
+                    status("Conferindo o idioma na página do lançamento ($checks de no máximo $MAX_DESCRIPTION_CHECKS)…\n${it.title}")
                     Thread.sleep(PAUSE_MS)
                     val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { continue }
                     when {
@@ -89,8 +102,11 @@ object Nyaa {
                         PTBR.containsMatchIn(files) -> found[it.infoHash] = it.toResult("arquivos", batch)
                     }
                 }
+            } catch (e: InterruptedException) {
+                throw e
             } catch (e: Exception) {
                 lastError = e
+                status("Erro ao consultar o Nyaa: ${e.message}. Tentando continuar…")
             }
             if (found.values.count { !it.batch } >= 3) break
             Thread.sleep(PAUSE_MS)

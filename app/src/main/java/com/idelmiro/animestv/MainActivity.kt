@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
@@ -13,6 +15,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ProgressBar
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -25,6 +28,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -51,6 +55,9 @@ class MainActivity : Activity() {
     private val cache = HashMap<LocalDate, List<Airing>>()
     private var loading: Job? = null
     private var loadError: String? = null
+    private val ui = Handler(Looper.getMainLooper())
+    /** Janela "Abrindo no Amnis…" e o aviso de demora, enquanto o Amnis não assume a tela. */
+    private var launchWatch: Pair<AlertDialog, Runnable>? = null
 
     // Teste guiado de formas de abrir o Crunchyroll. Fica salvo nas preferências porque
     // o Android pode fechar este app enquanto o Crunchyroll toca o vídeo.
@@ -208,7 +215,18 @@ class MainActivity : Activity() {
         runTest(t, 0)
     }
 
+    override fun onPause() {
+        super.onPause()
+        // Outro app (o Amnis) assumiu a tela: a abertura deu certo.
+        launchWatch?.let { (dlg, timeout) ->
+            ui.removeCallbacks(timeout)
+            dlg.dismiss()
+            launchWatch = null
+        }
+    }
+
     override fun onDestroy() {
+        launchWatch?.let { ui.removeCallbacks(it.second) }
         scope.cancel()
         super.onDestroy()
     }
@@ -388,12 +406,40 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** Janela com indicador girando e um texto que é atualizado com a etapa real. */
+    private class Progress(val dialog: AlertDialog, val text: TextView)
+
+    private fun progressDialog(title: String, message: String, onCancel: (() -> Unit)?): Progress {
+        val pad = (24 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(pad, pad, pad, pad / 2)
+        }
+        box.addView(ProgressBar(this).apply { isIndeterminate = true })
+        val text = TextView(this).apply {
+            setPadding(pad, 0, 0, 0)
+            textSize = 16f
+            this.text = message
+        }
+        box.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val b = dialog().setTitle(title).setView(box).setCancelable(onCancel != null)
+        if (onCancel != null) {
+            b.setNegativeButton("Cancelar") { _, _ -> onCancel() }
+            b.setOnCancelListener { onCancel() }
+        }
+        return Progress(b.show(), text)
+    }
+
     private fun searchNyaa(a: Airing, episode: Int) {
-        toast("Procurando o episódio $episode legendado em PT-BR…")
-        scope.launch {
+        var job: Job? = null
+        val prog = progressDialog("${a.anime.title} — Ep. $episode", "Preparando a busca…") { job?.cancel() }
+        job = scope.launch {
             try {
                 val names = listOf(a.anime.title) + a.anime.altTitles
-                val results = withContext(Dispatchers.IO) { Nyaa.search(names, episode) }
+                val results = runInterruptible(Dispatchers.IO) {
+                    Nyaa.search(names, episode) { msg -> ui.post { prog.text.text = msg } }
+                }
+                prog.dialog.dismiss()
                 if (results.isEmpty()) {
                     val b = dialog().setTitle("Sem legenda PT-BR")
                         .setMessage("Não encontrei o episódio $episode de \"${a.anime.title}\" com legenda em português. " +
@@ -412,20 +458,47 @@ class MainActivity : Activity() {
                     "${r.seeders} seeds • ${r.size} • PT-BR no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
                 dialog().setTitle("${a.anime.title} — Ep. $episode")
-                    .setItems(labels) { _, which ->
-                        val r = shown[which]
-                        if (r.batch) toast("É um pacote com vários episódios: escolha o $episode no Amnis.")
-                        Amnis.open(this@MainActivity, r.magnet)?.let { toast(it) }
-                    }
+                    .setItems(labels) { _, which -> openInAmnis(shown[which], episode) }
                     .setNegativeButton("Fechar", null)
                     .show()
             } catch (e: CancellationException) {
+                prog.dialog.dismiss()
                 throw e
             } catch (e: Exception) {
+                prog.dialog.dismiss()
                 dialog().setTitle("Busca no Nyaa").setMessage("Não consegui buscar: ${e.message}")
                     .setPositiveButton("OK", null).show()
             }
         }
+    }
+
+    /**
+     * Abre o magnet no Amnis e acompanha de verdade: a janela de espera só some quando o
+     * Amnis assume a tela (o Android pausa este app). Se isso não acontecer em alguns
+     * segundos, avisa e oferece tentar de novo.
+     */
+    private fun openInAmnis(r: Nyaa.Result, episode: Int) {
+        val hint = if (r.batch) "\n\nÉ um pacote: escolha o episódio $episode na lista do Amnis." else ""
+        val prog = progressDialog("Abrindo no Amnis", "Enviando o link para o Amnis…\n${r.title}$hint", null)
+        val msg = Amnis.open(this, r.magnet)
+        if (msg != null) {
+            // Sem Amnis: o Android mostrou a lista de outros apps.
+            prog.dialog.dismiss()
+            toast(msg)
+            return
+        }
+        prog.text.text = "Esperando o Amnis abrir…\n${r.title}$hint"
+        val timeout = Runnable {
+            launchWatch = null
+            prog.dialog.dismiss()
+            dialog().setTitle("O Amnis não abriu")
+                .setMessage("Mandei o link, mas o Amnis não apareceu na tela em 10 segundos.\n\n${r.title}")
+                .setPositiveButton("Tentar de novo") { _, _ -> openInAmnis(r, episode) }
+                .setNegativeButton("Fechar", null)
+                .show()
+        }
+        launchWatch = prog.dialog to timeout
+        ui.postDelayed(timeout, 10_000)
     }
 
     private fun openUrl(url: String) {
