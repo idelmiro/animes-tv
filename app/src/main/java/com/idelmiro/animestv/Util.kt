@@ -22,6 +22,15 @@ import java.net.URL
 import java.util.concurrent.Executors
 
 /** Carregador de imagens simples, com cache em memória. */
+/** TV ou celular/tablet: a tela principal e o player se adaptam a cada um. */
+object Device {
+    fun isTv(ctx: android.content.Context): Boolean {
+        val ui = ctx.getSystemService(android.content.Context.UI_MODE_SERVICE) as android.app.UiModeManager
+        return ui.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
+            ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+    }
+}
+
 object ImageLoader {
     private val cache = object : LruCache<String, Bitmap>(48 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount

@@ -63,6 +63,36 @@ class MainActivity : Activity() {
     // o Android pode fechar este app enquanto o Crunchyroll toca o vídeo.
     private class TestRun(val kind: String, val variants: List<CrunchyrollLauncher.Variant>, val question: String)
 
+    private var isPhone = false
+
+    /**
+     * Celular: menos margem, cabeçalho em duas linhas na vertical (botões roláveis para o
+     * lado), número de colunas pela largura da tela e cards que não "vazam" por cima dos
+     * dias ao rolar a lista.
+     */
+    private fun adaptForPhone(grid: RecyclerView) {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        val root = findViewById<LinearLayout>(R.id.root)
+        root.setPadding(dp(10), dp(8), dp(10), 0)
+        root.clipChildren = true
+        grid.clipChildren = true
+        grid.clipToPadding = true
+        val title = findViewById<TextView>(R.id.titleText)
+        title.textSize = 20f
+        if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+            findViewById<LinearLayout>(R.id.header).orientation = LinearLayout.VERTICAL
+            title.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            findViewById<View>(R.id.headerScroll).layoutParams =
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) }
+        }
+        val widthDp = resources.configuration.screenWidthDp - 20
+        val span = maxOf(2, widthDp / 140)
+        grid.layoutManager = GridLayoutManager(this, span)
+        val colPx = (widthDp * d / span).toInt() - dp(16) - dp(8)
+        adapter.posterHeight = (colPx * 1.42f).toInt()
+    }
+
     private val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
     private val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
 
@@ -80,6 +110,8 @@ class MainActivity : Activity() {
         val grid = findViewById<RecyclerView>(R.id.grid)
         grid.layoutManager = GridLayoutManager(this, 6)
         grid.adapter = adapter
+        isPhone = !Device.isTv(this)
+        if (isPhone) adaptForPhone(grid)
 
         findViewById<Button>(R.id.btnPrev).setOnClickListener { changeWeek(-1) }
         findViewById<Button>(R.id.btnNext).setOnClickListener { changeWeek(1) }
@@ -300,6 +332,13 @@ class MainActivity : Activity() {
                 if (hasFocus && selected != d) selectDay(d)
             }
             tv.setOnClickListener { selectDay(d) }
+            if (isPhone) {
+                tv.textSize = 13f
+                (tv.layoutParams as ViewGroup.MarginLayoutParams).apply {
+                    marginStart = (2 * resources.displayMetrics.density).toInt()
+                    marginEnd = marginStart
+                }
+            }
             daysRow.addView(tv)
         }
         updateDays()
@@ -689,6 +728,9 @@ class AnimeAdapter(
 
     private val timeFmt = DateTimeFormatter.ofPattern("HH:mm")
 
+    /** Altura do pôster em pixels (celular: proporcional à coluna); 0 = a do layout (TV). */
+    var posterHeight = 0
+
     class VH(v: View) : RecyclerView.ViewHolder(v) {
         val poster: ImageView = v.findViewById(R.id.poster)
         val time: TextView = v.findViewById(R.id.time)
@@ -700,6 +742,7 @@ class AnimeAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val v = LayoutInflater.from(parent.context).inflate(R.layout.item_anime, parent, false)
+        if (posterHeight > 0) v.findViewById<ImageView>(R.id.poster).layoutParams.height = posterHeight
         v.setOnFocusChangeListener { view, hasFocus ->
             val s = if (hasFocus) 1.08f else 1f
             view.animate().scaleX(s).scaleY(s).setDuration(120).start()
