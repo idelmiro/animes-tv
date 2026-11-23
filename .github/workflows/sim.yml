@@ -1,0 +1,12 @@
+name: Simulação temporária
+on:
+  push:
+    branches: [sim-consultas]
+permissions:
+  contents: read
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/sim.py
