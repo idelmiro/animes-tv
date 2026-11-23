@@ -73,6 +73,16 @@ class Prefs(context: Context) {
         get() = sp.getInt("videoMode2", 0)
         set(v) = sp.edit().putInt("videoMode2", v.coerceIn(0, 3)).apply()
 
+    /** Pasta base dos downloads (null = memória interna). */
+    var downloadPath: String?
+        get() = sp.getString("downloadPath", null)
+        set(v) = sp.edit().putString("downloadPath", v).apply()
+
+    /** Limite total dos downloads, em GB. */
+    var downloadCapGb: Int
+        get() = sp.getInt("downloadCapGb", 1)
+        set(v) = sp.edit().putInt("downloadCapGb", v).apply()
+
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)
         set(v) = sp.edit().putInt("offset", v).apply()

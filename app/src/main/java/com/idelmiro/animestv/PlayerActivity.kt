@@ -61,7 +61,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         episode = intent.getIntExtra(EXTRA_EPISODE, 0)
         val magnet = intent.getStringExtra(EXTRA_MAGNET)
-        if (magnet == null) {
+        val local = intent.getStringExtra(EXTRA_LOCAL_FILE)
+        if (magnet == null && local == null) {
             finish()
             return
         }
@@ -70,7 +71,16 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         PlayerLog.add("mpv: iniciando")
         startMpv()
         PlayerLog.add("mpv: pronto")
-        torrent = TorrentStream(applicationContext, magnet, episode,
+        if (local != null) {
+            // Episódio já baixado: toca direto do arquivo, sem Nyaa e sem torrent.
+            val f = File(local)
+            f.parentFile?.let { Downloads.touch(it) }
+            PlayerLog.add("player: tocando arquivo salvo ${f.absolutePath}")
+            onTorrent(TorrentStream.Status(TorrentStream.Phase.COMPLETE, "Tocando o episódio salvo (sem usar a internet).",
+                done = f.length(), total = f.length()))
+            load(f.absolutePath)
+        } else torrent = TorrentStream(applicationContext, magnet!!, episode,
+            intent.getIntExtra(EXTRA_ANIME_ID, 0), title, intent.getStringExtra(EXTRA_RELEASE) ?: "",
             onStatus = { s -> ui.post { onTorrent(s) } },
             onReady = { url -> ui.post { load(url) } },
             onOversize = { size, count, bytes, answer -> ui.post { askOversize(size, count, bytes, answer) } }
@@ -201,8 +211,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         var answered = false
         val reply = { yes: Boolean -> if (!answered) { answered = true; answer(yes) } }
         android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Arquivo maior que 1 GB")
-            .setMessage("Este episódio tem ${Downloads.human(size)}, acima do limite de 1 GB.\n\n$saved\n\nBaixar mesmo assim?")
+            .setTitle("Arquivo maior que ${Downloads.capLabel(this)}")
+            .setMessage("Este episódio tem ${Downloads.human(size)}, acima do limite de ${Downloads.capLabel(this)}.\n\n$saved\n\nBaixar mesmo assim?")
             .setPositiveButton("Baixar mesmo assim") { _, _ -> reply(true) }
             .setNegativeButton("Cancelar") { _, _ -> reply(false) }
             .setOnCancelListener { reply(false) }
@@ -609,5 +619,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         const val EXTRA_TITLE = "title"
         const val EXTRA_EPISODE = "episode"
         const val EXTRA_START = "start"
+        const val EXTRA_LOCAL_FILE = "localFile"
+        const val EXTRA_ANIME_ID = "animeId"
+        const val EXTRA_RELEASE = "release"
     }
 }
