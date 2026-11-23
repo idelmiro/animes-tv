@@ -11,8 +11,18 @@ data class Anime(
     val title: String,
     val cover: String?,
     val crunchyrollUrl: String?,
-    val banner: String? = null
-)
+    val banner: String? = null,
+    /** Outros nomes do anime (inglês, sinônimos), usados na busca do Nyaa. */
+    val altTitles: List<String> = emptyList(),
+    /** Links de streaming que não são do Crunchyroll (Netflix, Disney+...). */
+    val streams: List<Stream> = emptyList()
+) {
+    /** Nome curto do serviço para o selo do card. */
+    val serviceLabel: String?
+        get() = if (crunchyrollUrl != null) null else streams.firstOrNull()?.site ?: "Outro"
+}
+
+data class Stream(val site: String, val url: String)
 
 /** Um episódio na grade. [airingAt] é o horário de exibição no Japão (segundos desde 1970). */
 data class Airing(val anime: Anime, val episode: Int, val airingAt: Long) {
@@ -37,9 +47,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("onlyFavs", false)
         set(v) = sp.edit().putBoolean("onlyFavs", v).apply()
 
+    // Chave nova: a partir desta versão o padrão é mostrar todos os serviços.
     var onlyCrunchyroll: Boolean
-        get() = sp.getBoolean("onlyCr", true)
-        set(v) = sp.edit().putBoolean("onlyCr", v).apply()
+        get() = sp.getBoolean("onlyCr2", false)
+        set(v) = sp.edit().putBoolean("onlyCr2", v).apply()
 
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)
@@ -90,9 +101,10 @@ object AniList {
                 id
                 isAdult
                 title { romaji english }
+                synonyms
                 coverImage { large }
                 bannerImage
-                externalLinks { site url }
+                externalLinks { site url type }
               }
             }
           }
@@ -124,18 +136,28 @@ object AniList {
         val title = t?.str("romaji") ?: t?.str("english") ?: return null
         val cover = media.optJSONObject("coverImage")?.str("large")
         var cr: String? = null
+        val streams = ArrayList<Stream>()
         val links: JSONArray? = media.optJSONArray("externalLinks")
         if (links != null) {
             for (i in 0 until links.length()) {
                 val l = links.getJSONObject(i)
-                if (l.str("site").equals("Crunchyroll", ignoreCase = true)) {
-                    cr = l.str("url")
-                    break
+                val site = l.str("site") ?: continue
+                val url = l.str("url") ?: continue
+                if (site.equals("Crunchyroll", ignoreCase = true)) {
+                    if (cr == null) cr = url
+                } else if (l.str("type").equals("STREAMING", ignoreCase = true)) {
+                    streams.add(Stream(site, url))
                 }
             }
         }
+        val alt = LinkedHashSet<String>()
+        t?.str("english")?.let { alt.add(it) }
+        media.optJSONArray("synonyms")?.let { arr ->
+            for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { alt.add(it) }
+        }
+        alt.remove(title)
         return Airing(
-            anime = Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage")),
+            anime = Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage"), alt.toList(), streams),
             episode = o.optInt("episode"),
             airingAt = o.getLong("airingAt")
         )

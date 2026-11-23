@@ -331,6 +331,10 @@ class MainActivity : Activity() {
     }
 
     private fun onAnimeClick(a: Airing) {
+        if (a.anime.crunchyrollUrl == null) {
+            onOtherServiceClick(a)
+            return
+        }
         val fav = prefs.isFav(a.anime.id)
         val options = arrayOf(
             "▶ Assistir episódio ${a.episode}",
@@ -344,16 +348,79 @@ class MainActivity : Activity() {
                 when (which) {
                     0 -> watchEpisode(a)
                     1 -> CrunchyrollLauncher.openSeries(this, a.anime.crunchyrollUrl)?.let { toast(it) }
-                    2 -> {
-                        prefs.toggleFav(a.anime.id)
-                        updateDays()
-                        if (prefs.onlyFavorites) showDay() else adapter.notifyDataSetChanged()
-                        HomeWorker.runNow(this)
-                    }
+                    2 -> toggleFav(a)
                     3 -> testEpisode(a)
                     4 -> testSeries(a)
                 }
             }.show()
+    }
+
+    private fun toggleFav(a: Airing) {
+        prefs.toggleFav(a.anime.id)
+        updateDays()
+        if (prefs.onlyFavorites) showDay() else adapter.notifyDataSetChanged()
+        HomeWorker.runNow(this)
+    }
+
+    // ---------- animes fora do Crunchyroll: Nyaa + Amnis ----------
+
+    private fun onOtherServiceClick(a: Airing) {
+        val fav = prefs.isFav(a.anime.id)
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        actions += "▶ Buscar episódio ${a.episode} legendado (PT-BR)" to { searchNyaa(a) }
+        for (st in a.anime.streams) actions += "Abrir no ${st.site}" to { openUrl(st.url) }
+        actions += (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
+        val where = a.anime.streams.joinToString(", ") { it.site }.ifEmpty { "serviço não informado" }
+        dialog().setTitle("${a.anime.title} — Ep. ${a.episode}\n($where)")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
+    }
+
+    private fun searchNyaa(a: Airing) {
+        toast("Procurando o episódio ${a.episode} legendado em PT-BR…")
+        scope.launch {
+            try {
+                val names = listOf(a.anime.title) + a.anime.altTitles
+                val results = withContext(Dispatchers.IO) { Nyaa.search(names, a.episode) }
+                if (results.isEmpty()) {
+                    val b = dialog().setTitle("Sem legenda PT-BR ainda")
+                        .setMessage("Não encontrei o episódio ${a.episode} de \"${a.anime.title}\" com legenda em português. " +
+                            "As legendas costumam sair alguns dias depois; tente de novo mais tarde.")
+                        .setPositiveButton("OK", null)
+                    a.anime.streams.firstOrNull()?.let { st ->
+                        b.setNeutralButton("Abrir no ${st.site}") { _, _ -> openUrl(st.url) }
+                    }
+                    b.show()
+                    return@launch
+                }
+                val shown = results.take(12)
+                val labels = shown.map { r ->
+                    val kind = if (r.batch) " • pacote" else ""
+                    "${r.seeders} seeds • ${r.size} • PT-BR no ${r.via}$kind\n${r.title}"
+                }.toTypedArray()
+                dialog().setTitle("${a.anime.title} — Ep. ${a.episode}")
+                    .setItems(labels) { _, which ->
+                        val r = shown[which]
+                        if (r.batch) toast("É um pacote com vários episódios: escolha o ${a.episode} no Amnis.")
+                        Amnis.open(this@MainActivity, r.magnet)?.let { toast(it) }
+                    }
+                    .setNegativeButton("Fechar", null)
+                    .show()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dialog().setTitle("Busca no Nyaa").setMessage("Não consegui buscar: ${e.message}")
+                    .setPositiveButton("OK", null).show()
+            }
+        }
+    }
+
+    private fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+        } catch (_: Exception) {
+            toast("Nenhum app desta TV abre esse link.")
+        }
     }
 
     // ---------- ajustes ----------
@@ -361,7 +428,7 @@ class MainActivity : Activity() {
     private fun openSettings() {
         val options = arrayOf(
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
-            "Só animes com link do Crunchyroll: ${if (prefs.onlyCrunchyroll) "Sim" else "Não"}",
+            "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
             "Atualizar o canal \"Animes de hoje\" agora",
             "Diagnóstico",
             "Verificar atualização (versão ${BuildConfig.VERSION_CODE})"
@@ -373,7 +440,7 @@ class MainActivity : Activity() {
                     prefs.onlyCrunchyroll = !prefs.onlyCrunchyroll
                     updateDays()
                     showDay()
-                    toast(if (prefs.onlyCrunchyroll) "Mostrando só animes do Crunchyroll" else "Mostrando todos os animes")
+                    toast(if (prefs.onlyCrunchyroll) "Mostrando só animes do Crunchyroll" else "Mostrando animes de todos os serviços")
                 }
                 2 -> {
                     HomeWorker.runNow(this)
@@ -416,6 +483,7 @@ class MainActivity : Activity() {
                 append(ManifestReader.report(this@MainActivity, p))
                 appendLine()
             }
+            appendLine("Amnis (torrent): ${if (Amnis.isInstalled(this@MainActivity)) "instalado" else "não instalado"}")
             appendLine("Forma de abrir anime: ${prefs.openMethod ?: CrunchyrollLauncher.DEFAULT_SERIES_METHOD + " (padrão)"}")
             appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: CrunchyrollLauncher.DEFAULT_EPISODE_METHOD + " (padrão)"}")
             appendLine("Códigos de episódio vêm de: ${CrunchyrollApi.lastSource.ifEmpty { "nenhuma busca ainda" }}")
@@ -471,6 +539,7 @@ class AnimeAdapter(
         val ep: TextView = v.findViewById(R.id.ep)
         val heart: TextView = v.findViewById(R.id.heart)
         val title: TextView = v.findViewById(R.id.title)
+        val service: TextView = v.findViewById(R.id.service)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -490,9 +559,21 @@ class AnimeAdapter(
         holder.ep.text = a.episode.toString()
         holder.heart.visibility = if (prefs.isFav(a.anime.id)) View.VISIBLE else View.GONE
         holder.title.text = a.anime.title
+        val svc = a.anime.serviceLabel
+        holder.service.visibility = if (svc == null) View.GONE else View.VISIBLE
+        holder.service.text = svc?.let { shortService(it) }
         ImageLoader.load(a.anime.cover, holder.poster)
         holder.itemView.setOnClickListener { onClick(a) }
     }
 
     override fun getItemCount() = items.size
+
+    private fun shortService(site: String): String = when {
+        site.contains("Netflix", true) -> "Netflix"
+        site.contains("Disney", true) -> "Disney+"
+        site.contains("Prime", true) || site.contains("Amazon", true) -> "Prime"
+        site.contains("HIDIVE", true) -> "HIDIVE"
+        site.contains("Max", true) || site.contains("HBO", true) -> "Max"
+        else -> site.take(10)
+    }
 }
