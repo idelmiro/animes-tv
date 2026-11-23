@@ -69,8 +69,8 @@ class Prefs(context: Context) {
      * depender do decodificador da TV). Sobe sozinho se o player fechar ao abrir um vídeo.
      */
     var videoMode: Int
-        get() = sp.getInt("videoMode", 0)
-        set(v) = sp.edit().putInt("videoMode", v.coerceIn(0, 2)).apply()
+        get() = sp.getInt("videoMode2", 0)
+        set(v) = sp.edit().putInt("videoMode2", v.coerceIn(0, 2)).apply()
 
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)

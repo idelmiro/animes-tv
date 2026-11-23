@@ -99,10 +99,10 @@ class MainActivity : Activity() {
         updateFavButton()
         load()
         PlayerLog.crashed(this)?.let { log ->
-            // Fechou depois de mandar abrir o vídeo: provável problema de decodificação na TV.
-            // Na próxima vez, usa um modo de vídeo mais compatível.
+            // Fechou depois de o vídeo começar a ser lido (evento 8 = arquivo carregado):
+            // provável problema de decodificação na TV. Na próxima vez, usa um modo mais compatível.
             var note = ""
-            if (log.contains("mpv: abrir") && prefs.videoMode < 2) {
+            if (log.contains("mpv: evento 8") && prefs.videoMode < 2) {
                 prefs.videoMode = prefs.videoMode + 1
                 note = "\n\nNa próxima vez vou usar um modo de vídeo mais compatível (modo ${prefs.videoMode})."
             }
