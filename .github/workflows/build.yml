@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths-ignore: ['tools/**', '.github/workflows/probe.yml', '.github/workflows/episodes.yml']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -36,6 +37,7 @@ jobs:
           path: animes-tv.apk
 
       - name: Publicar versão
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
