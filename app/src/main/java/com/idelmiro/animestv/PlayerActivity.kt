@@ -57,6 +57,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemBars()
         title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         episode = intent.getIntExtra(EXTRA_EPISODE, 0)
         val magnet = intent.getStringExtra(EXTRA_MAGNET)
@@ -75,6 +76,19 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             onOversize = { size, count, bytes, answer -> ui.post { askOversize(size, count, bytes, answer) } }
         ).also { it.start() }
         updatePanel()
+    }
+
+    /** Tela cheia de verdade no celular (some a barra de navegação). */
+    @Suppress("DEPRECATION")
+    private fun hideSystemBars() {
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
     }
 
     // ---------- tela ----------
@@ -131,6 +145,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         root.addView(osd, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
             leftMargin = (32 * d).toInt(); bottomMargin = (32 * d).toInt()
         })
+        buildTouchControls(root)
         setContentView(root)
         surface.holder.addCallback(this)
     }
@@ -406,13 +421,14 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
                 "duration" -> duration = value
             }
             if (showDetails || buffering) updatePanel()
+            if (::controls.isInitialized && controls.visibility == View.VISIBLE) updateControls()
         }
     }
 
     override fun eventProperty(property: String, value: Boolean) {
         ui.post {
             when (property) {
-                "pause" -> paused = value
+                "pause" -> { paused = value; updateControls() }
                 "paused-for-cache" -> { buffering = value; updatePanel() }
                 "eof-reached" -> if (value) showOsd("Fim do episódio. Aperte Voltar para sair.")
             }
@@ -441,31 +457,132 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         if (!mpvReady) return super.onKeyDown(keyCode, event)
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-            KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                MPVLib.command(arrayOf("cycle", "pause"))
-                paused = !paused
-                showOsd()
-            }
+            KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> togglePause()
             KeyEvent.KEYCODE_DPAD_LEFT -> seek(-10)
             KeyEvent.KEYCODE_DPAD_RIGHT -> seek(10)
             KeyEvent.KEYCODE_MEDIA_REWIND -> seek(-30)
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> seek(30)
-            KeyEvent.KEYCODE_DPAD_UP -> {
-                MPVLib.command(arrayOf("cycle", "sub"))
-                ui.postDelayed({
-                    val sub = MPVLib.getPropertyString("current-tracks/sub/title")
-                        ?: MPVLib.getPropertyString("current-tracks/sub/lang")
-                    showOsd("Legenda: ${sub ?: "desligada"}")
-                }, 300)
-            }
-            KeyEvent.KEYCODE_DPAD_DOWN -> {
-                showDetails = !showDetails
-                updatePanel()
-                if (showDetails) ui.post(detailsTicker)
-            }
+            KeyEvent.KEYCODE_DPAD_UP -> cycleSub()
+            KeyEvent.KEYCODE_DPAD_DOWN -> toggleDetails()
             else -> return super.onKeyDown(keyCode, event)
         }
         return true
+    }
+
+    private fun togglePause() {
+        MPVLib.command(arrayOf("cycle", "pause"))
+        paused = !paused
+        showOsd()
+        updateControls()
+    }
+
+    private fun cycleSub() {
+        MPVLib.command(arrayOf("cycle", "sub"))
+        ui.postDelayed({
+            val sub = MPVLib.getPropertyString("current-tracks/sub/title")
+                ?: MPVLib.getPropertyString("current-tracks/sub/lang")
+            showOsd("Legenda: ${sub ?: "desligada"}")
+        }, 300)
+    }
+
+    private fun toggleDetails() {
+        showDetails = !showDetails
+        updatePanel()
+        if (showDetails) ui.post(detailsTicker)
+    }
+
+    // ---------- toque (celular) ----------
+
+    private lateinit var controls: LinearLayout
+    private lateinit var seekBar: android.widget.SeekBar
+    private lateinit var timeText: TextView
+    private lateinit var playBtn: android.widget.Button
+    private var userSeeking = false
+    private val hideControls = Runnable { if (!paused) controls.visibility = View.GONE }
+
+    /** Barra com botões e linha do tempo, que aparece ao tocar na tela. */
+    private fun buildTouchControls(root: FrameLayout) {
+        val d = resources.displayMetrics.density
+        fun dp(v: Int) = (v * d).toInt()
+        controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xB3000000.toInt())
+            setPadding(dp(16), dp(8), dp(16), dp(12))
+            visibility = View.GONE
+            isClickable = true // toques na barra não chegam ao vídeo
+        }
+        val line = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        seekBar = android.widget.SeekBar(this)
+        timeText = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; setPadding(dp(8), 0, 0, 0) }
+        line.addView(seekBar, LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(timeText)
+        controls.addView(line)
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        fun btn(label: String, action: () -> Unit) = android.widget.Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { action(); showControls() }
+        }.also { buttons.addView(it) }
+        btn("−10 s") { seek(-10) }
+        playBtn = btn("⏸") { togglePause() }
+        btn("+10 s") { seek(10) }
+        btn("Legenda") { cycleSub() }
+        btn("Detalhes") { toggleDetails() }
+        controls.addView(buttons)
+        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+
+        seekBar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar, p: Int, fromUser: Boolean) {
+                if (fromUser) timeText.text = "${time(p.toLong())} / ${time(duration)}"
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar) { userSeeking = true; ui.removeCallbacks(hideControls) }
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar) {
+                userSeeking = false
+                MPVLib.command(arrayOf("seek", sb.progress.toString(), "absolute"))
+                position = sb.progress.toLong()
+                showControls()
+            }
+        })
+
+        // Toque simples: mostra/esconde a barra. Toque duplo nas laterais: volta/avança 10 s.
+        val gestures = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: android.view.MotionEvent) = true
+            override fun onSingleTapConfirmed(e: android.view.MotionEvent): Boolean {
+                if (controls.visibility == View.VISIBLE) controls.visibility = View.GONE else showControls()
+                return true
+            }
+            override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
+                val third = root.width / 3f
+                when {
+                    e.x < third -> seek(-10)
+                    e.x > 2 * third -> seek(10)
+                    else -> togglePause()
+                }
+                return true
+            }
+        })
+        root.setOnTouchListener { _, ev -> gestures.onTouchEvent(ev) }
+    }
+
+    private fun showControls() {
+        if (!::controls.isInitialized) return
+        updateControls()
+        controls.visibility = View.VISIBLE
+        ui.removeCallbacks(hideControls)
+        ui.postDelayed(hideControls, 5000)
+    }
+
+    private fun updateControls() {
+        if (!::controls.isInitialized) return
+        playBtn.text = if (paused) "▶" else "⏸"
+        if (!userSeeking) {
+            seekBar.max = maxOf(duration, 1L).toInt()
+            seekBar.progress = position.toInt()
+            timeText.text = "${time(position)} / ${time(duration)}"
+        }
     }
 
     private fun seek(seconds: Int) {
