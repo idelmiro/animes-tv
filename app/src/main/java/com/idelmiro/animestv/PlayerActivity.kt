@@ -26,7 +26,7 @@ import java.util.Locale
  * Controle remoto: OK = pausar/continuar; ◀ ▶ = voltar/avançar 10 s;
  * ▲ = trocar legenda; ▼ = mostrar/esconder detalhes do download; Voltar = sair.
  */
-class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback {
+class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, SurfaceHolder.Callback {
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var surface: SurfaceView
@@ -58,8 +58,11 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
             finish()
             return
         }
+        PlayerLog.begin(this, "$title — Ep. $episode")
         buildViews()
+        PlayerLog.add("mpv: iniciando")
         startMpv()
+        PlayerLog.add("mpv: pronto")
         torrent = TorrentStream(applicationContext, magnet, episode,
             onStatus = { s -> ui.post { onTorrent(s) } },
             onReady = { url -> ui.post { load(url) } },
@@ -199,13 +202,15 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         MPVLib.setOptionString("gpu-context", "android")
         MPVLib.setOptionString("opengl-es", "yes")
         MPVLib.setOptionString("ao", "audiotrack,opensles")
-        MPVLib.setOptionString("hwdec", "mediacodec,mediacodec-copy")
+        val mode = Prefs(this).videoMode
+        PlayerLog.add("mpv: modo de vídeo $mode")
+        MPVLib.setOptionString("hwdec", when (mode) { 0 -> "mediacodec,mediacodec-copy"; 1 -> "mediacodec-copy"; else -> "no" })
         MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         MPVLib.setOptionString("cache", "yes")
         MPVLib.setOptionString("cache-pause-initial", "yes")
         MPVLib.setOptionString("cache-pause-wait", "3")
-        MPVLib.setOptionString("demuxer-max-bytes", "64MiB")
-        MPVLib.setOptionString("demuxer-max-back-bytes", "16MiB")
+        MPVLib.setOptionString("demuxer-max-bytes", "32MiB")
+        MPVLib.setOptionString("demuxer-max-back-bytes", "8MiB")
         MPVLib.setOptionString("network-timeout", "0")
         MPVLib.setOptionString("sub-scale-with-window", "yes")
         MPVLib.setOptionString("sub-use-margins", "no")
@@ -217,6 +222,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         MPVLib.setOptionString("force-window", "no")
         MPVLib.init()
         MPVLib.addObserver(this)
+        MPVLib.addLogObserver(this)
         MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_INT64)
         MPVLib.observeProperty("duration", MPVLib.MPV_FORMAT_INT64)
         MPVLib.observeProperty("pause", MPVLib.MPV_FORMAT_FLAG)
@@ -242,12 +248,20 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         )
     }
 
+    override fun logMessage(prefix: String, level: Int, text: String) {
+        // Só avisos e erros (e as linhas principais do player), para o registro não crescer demais.
+        if (level <= MPVLib.MPV_LOG_LEVEL_WARN || (prefix == "cplayer" && level <= MPVLib.MPV_LOG_LEVEL_INFO))
+            PlayerLog.add("mpv[$prefix]: ${text.trim()}")
+    }
+
     private fun load(url: String) {
+        PlayerLog.add("mpv: abrir $url")
         if (hasSurface) MPVLib.command(arrayOf("loadfile", url)) else pendingUrl = url
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         hasSurface = true
+        PlayerLog.add("tela: superfície criada")
         if (!mpvReady) return
         MPVLib.attachSurface(holder.surface)
         MPVLib.setOptionString("force-window", "yes")
@@ -294,6 +308,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
     }
 
     override fun event(eventId: Int) {
+        PlayerLog.add("mpv: evento $eventId")
         ui.post {
             when (eventId) {
                 MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { started = true; buffering = false; updatePanel() }
@@ -347,10 +362,12 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         ui.removeCallbacksAndMessages(null)
         torrent?.stop()
         if (mpvReady) {
+            MPVLib.removeLogObserver(this)
             MPVLib.removeObserver(this)
             MPVLib.destroy()
             mpvReady = false
         }
+        PlayerLog.end()
         super.onDestroy()
     }
 
