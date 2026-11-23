@@ -239,7 +239,7 @@ class MainActivity : Activity() {
                 val off = prefs.offsetMinutes * 60L
                 val start = week.atStartOfDay(zone).toEpochSecond() - off
                 val end = week.plusDays(7).atStartOfDay(zone).toEpochSecond() - off
-                val list = withContext(Dispatchers.IO) { AniList.fetch(start, end) }
+                val list = withContext(Dispatchers.IO) { AniList.fetchSchedule(start, end) }
                 cache[week] = list
                 if (week == monday) {
                     updateDays()
@@ -367,26 +367,39 @@ class MainActivity : Activity() {
     private fun onOtherServiceClick(a: Airing) {
         val fav = prefs.isFav(a.anime.id)
         val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "▶ Buscar episódio ${a.episode} legendado (PT-BR)" to { searchNyaa(a) }
+        actions += "▶ Buscar episódio ${a.episode} legendado (PT-BR)" to { searchNyaa(a, a.episode) }
+        if (a.episode > 1) actions += "Episódios anteriores…" to { chooseEarlierEpisode(a) }
         for (st in a.anime.streams) actions += "Abrir no ${st.site}" to { openUrl(st.url) }
         actions += (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
         val where = a.anime.streams.joinToString(", ") { it.site }.ifEmpty { "serviço não informado" }
-        dialog().setTitle("${a.anime.title} — Ep. ${a.episode}\n($where)")
+        val note = if (a.delayed) " • exibido no Japão há 1 semana" else ""
+        dialog().setTitle("${a.anime.title} — Ep. ${a.episode}\n($where$note)")
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
             .show()
     }
 
-    private fun searchNyaa(a: Airing) {
-        toast("Procurando o episódio ${a.episode} legendado em PT-BR…")
+    /** Segunda janela: lista os episódios anteriores (do mais recente para o primeiro). */
+    private fun chooseEarlierEpisode(a: Airing) {
+        val eps = (a.episode - 1 downTo maxOf(1, a.episode - 60)).toList()
+        val labels = eps.map { "Episódio $it" }.toTypedArray()
+        dialog().setTitle("${a.anime.title} — episódios anteriores")
+            .setItems(labels) { _, which -> searchNyaa(a, eps[which]) }
+            .setNegativeButton("Voltar") { _, _ -> onOtherServiceClick(a) }
+            .show()
+    }
+
+    private fun searchNyaa(a: Airing, episode: Int) {
+        toast("Procurando o episódio $episode legendado em PT-BR…")
         scope.launch {
             try {
                 val names = listOf(a.anime.title) + a.anime.altTitles
-                val results = withContext(Dispatchers.IO) { Nyaa.search(names, a.episode) }
+                val results = withContext(Dispatchers.IO) { Nyaa.search(names, episode) }
                 if (results.isEmpty()) {
-                    val b = dialog().setTitle("Sem legenda PT-BR ainda")
-                        .setMessage("Não encontrei o episódio ${a.episode} de \"${a.anime.title}\" com legenda em português. " +
-                            "As legendas costumam sair alguns dias depois; tente de novo mais tarde.")
+                    val b = dialog().setTitle("Sem legenda PT-BR")
+                        .setMessage("Não encontrei o episódio $episode de \"${a.anime.title}\" com legenda em português. " +
+                            "As legendas dependem dos fansubs e podem demorar; tente de novo mais tarde.")
                         .setPositiveButton("OK", null)
+                    if (a.episode > 1) b.setNegativeButton("Outro episódio") { _, _ -> chooseEarlierEpisode(a) }
                     a.anime.streams.firstOrNull()?.let { st ->
                         b.setNeutralButton("Abrir no ${st.site}") { _, _ -> openUrl(st.url) }
                     }
@@ -398,10 +411,10 @@ class MainActivity : Activity() {
                     val kind = if (r.batch) " • pacote" else ""
                     "${r.seeders} seeds • ${r.size} • PT-BR no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
-                dialog().setTitle("${a.anime.title} — Ep. ${a.episode}")
+                dialog().setTitle("${a.anime.title} — Ep. $episode")
                     .setItems(labels) { _, which ->
                         val r = shown[which]
-                        if (r.batch) toast("É um pacote com vários episódios: escolha o ${a.episode} no Amnis.")
+                        if (r.batch) toast("É um pacote com vários episódios: escolha o $episode no Amnis.")
                         Amnis.open(this@MainActivity, r.magnet)?.let { toast(it) }
                     }
                     .setNegativeButton("Fechar", null)

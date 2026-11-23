@@ -170,7 +170,7 @@ class HomeWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val nowSec = System.currentTimeMillis() / 1000
             val off = prefs.offsetMinutes * 60L
             val endOfToday = LocalDate.now().plusDays(1).atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
-            val list = withContext(Dispatchers.IO) { AniList.fetch(nowSec - 86400 - off, endOfToday - off) }
+            val list = withContext(Dispatchers.IO) { AniList.fetchSchedule(nowSec - 86400 - off, endOfToday - off) }
             val favs = prefs.favorites
             val selected = list.filter { it.anime.id in favs }
             prefs.homeStatus = withContext(Dispatchers.IO) { HomeScreen.publish(applicationContext, selected, prefs) }
