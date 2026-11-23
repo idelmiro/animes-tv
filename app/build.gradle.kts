@@ -49,6 +49,10 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    // Bibliotecas nativas comprimidas no APK (cai de ~77 MB para ~36 MB; o Android extrai ao instalar).
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+    }
     lint {
         abortOnError = false
         checkReleaseBuilds = false
