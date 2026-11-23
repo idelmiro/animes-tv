@@ -128,6 +128,7 @@ class TorrentStream(
     private var fileSize = 0L
     private var pieceLength = 1
     private var lastPiece = 0
+    private var infoHash: org.libtorrent4j.Sha1Hash? = null
     private var deadlineFrom = -1
 
     fun start() {
@@ -174,6 +175,7 @@ class TorrentStream(
             pieceLength = ti.pieceLength()
             lastPiece = ((fileOffset + fileSize - 1) / pieceLength).toInt()
             val hash = ti.infoHash().toHex()
+            infoHash = ti.infoHash()
             val d = Downloads.dirFor(ctx, hash, idx)
             dir = d
 
@@ -228,11 +230,14 @@ class TorrentStream(
                         val h = (alert as? TorrentAlert<*>)?.handle() ?: return
                         if (!h.isValid || h.infoHash().toHex() != hash) return
                         PlayerLog.add("torrent: alerta $type")
+                        // O handle que vem no alerta deixa de valer quando o alerta é descartado
+                        // (usá-lo depois derruba o app). Pega uma cópia própria pela sessão.
+                        val own = s.find(ti.infoHash()) ?: return
                         if (type == AlertType.ADD_TORRENT) {
-                            handle = h
-                            h.unsetFlags(TorrentFlags.AUTO_MANAGED)
-                            h.resume()
-                        } else finished(h)
+                            handle = own
+                            own.unsetFlags(TorrentFlags.AUTO_MANAGED)
+                            own.resume()
+                        } else finished(own)
                     } catch (e: Throwable) {
                         PlayerLog.add("torrent: erro no alerta: $e")
                     }
@@ -254,10 +259,9 @@ class TorrentStream(
             // Atualiza o andamento a cada segundo, enquanto baixa.
             while (!closed && !complete) {
                 Thread.sleep(1000)
-                val h = handle ?: continue
-                if (!h.isValid) continue
-                val st = h.status()
-                val done = h.fileProgress().getOrElse(idx) { 0L }
+                val h = handle ?: refind() ?: continue
+                val st = try { h.status() } catch (e: RuntimeException) { handle = null; continue }
+                val done = try { h.fileProgress().getOrElse(idx) { 0L } } catch (e: RuntimeException) { 0L }
                 val phase = if (st.numPeers() == 0) Phase.CONNECTING else Phase.DOWNLOADING
                 val msg = if (phase == Phase.CONNECTING) "Conectando às pessoas que têm o episódio…" else "Baixando o episódio…"
                 status(Status(phase, msg, st.numPeers(), st.numSeeds(), st.downloadRate(), st.uploadRate(), done, fileSize, waitingPiece >= 0))
@@ -394,9 +398,15 @@ class TorrentStream(
     private fun waitForPiece(piece: Int) {
         if (complete) return
         while (!closed && !complete) {
-            val h = handle
+            val h = handle ?: refind()
             if (h != null && h.isValid) {
-                if (h.havePiece(piece)) {
+                val have = try { h.havePiece(piece) } catch (e: RuntimeException) {
+                    PlayerLog.add("http: handle inválido, buscando de novo ($e)")
+                    handle = null
+                    Thread.sleep(100)
+                    continue
+                }
+                if (have) {
                     if (waitingPiece == piece) waitingPiece = -1
                     return
                 }
@@ -415,6 +425,12 @@ class TorrentStream(
         }
         if (closed) throw InterruptedException()
         waitingPiece = -1
+    }
+
+    /** Cópia própria do handle, pedida à sessão (nunca a do alerta). */
+    private fun refind(): TorrentHandle? {
+        val ih = infoHash ?: return null
+        return try { session?.find(ih)?.also { handle = it } } catch (_: Throwable) { null }
     }
 
     companion object {
