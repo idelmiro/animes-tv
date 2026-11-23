@@ -560,7 +560,7 @@ class MainActivity : Activity() {
                     toast(if (prefs.useAmnis) "Episódios do Nyaa vão abrir no Amnis" else "Episódios do Nyaa vão tocar no próprio Animes TV")
                 }
                 3 -> {
-                    val labels = (0..2).map { videoModeName(it) }.toTypedArray()
+                    val labels = (0..3).map { videoModeName(it) }.toTypedArray()
                     dialog().setTitle("Modo de vídeo").setSingleChoiceItems(labels, prefs.videoMode) { d, which ->
                         prefs.videoMode = which
                         d.dismiss()
@@ -635,7 +635,8 @@ class MainActivity : Activity() {
     private fun videoModeName(m: Int) = when (m) {
         0 -> "hardware (padrão)"
         1 -> "hardware com cópia"
-        else -> "só processador (mais pesado)"
+        2 -> "só processador (mais pesado)"
+        else -> "leve: vídeo direto, legenda simples"
     }
 
     /** Mostra o registro do player (as últimas linhas, que dizem onde parou). */

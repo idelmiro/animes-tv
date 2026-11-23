@@ -2,6 +2,7 @@ package com.idelmiro.animestv
 
 import android.app.Activity
 import android.graphics.Color
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -46,6 +47,11 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     private var showDetails = false
     private var last: TorrentStream.Status? = null
     private var title = ""
+    private var mode = 0
+    private var vo = "gpu"
+    private lateinit var subView: TextView
+    private var lastDrops = 0
+    private var suggested = false
     private var episode = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,6 +107,18 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         panel.addView(panelText)
         root.addView(panel, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER).apply {
             leftMargin = (48 * d).toInt(); rightMargin = (48 * d).toInt()
+        })
+
+        subView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 30f
+            gravity = Gravity.CENTER
+            setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            paint.isFakeBoldText = true
+            visibility = View.GONE
+        }
+        root.addView(subView, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            leftMargin = (64 * d).toInt(); rightMargin = (64 * d).toInt(); bottomMargin = (40 * d).toInt()
         })
 
         osd = TextView(this).apply {
@@ -194,8 +212,49 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
 
     private val statsLogger = object : Runnable {
         override fun run() {
-            if (mpvReady && started) PlayerLog.add("stats: " + playbackStats().replace("\n", " | "))
+            if (mpvReady && started) {
+                PlayerLog.add("stats: " + playbackStats().replace("\n", " | "))
+                val drops = try { (MPVLib.getPropertyInt("frame-drop-count") ?: 0) + (MPVLib.getPropertyInt("decoder-frame-drop-count") ?: 0) } catch (_: Throwable) { 0 }
+                // Mais de 10% dos quadros perdidos em 15 s (24 × 15 = 360): sugere outro modo.
+                if (!paused && drops - lastDrops > 36 && mode != 3 && !suggested) suggestLighterMode(drops - lastDrops)
+                lastDrops = drops
+            }
             ui.postDelayed(this, 15000)
+        }
+    }
+
+    /** O vídeo está engasgando: oferece o modo leve e reabre no mesmo ponto. */
+    private fun suggestLighterMode(lost: Int) {
+        suggested = true
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("O vídeo está travando")
+            .setMessage("Nos últimos 15 segundos a TV perdeu $lost de 360 quadros.\n\n" +
+                "O modo leve manda o vídeo direto do decodificador para a tela, sem passar pela placa de vídeo. " +
+                "Costuma ficar fluido, mas a legenda aparece como texto simples (sem as cores e posições do fansub). " +
+                "Dá para voltar em Ajustes → Modo de vídeo do player.")
+            .setPositiveButton("Usar o modo leve") { _, _ ->
+                Prefs(this).videoMode = 3
+                PlayerLog.add("player: usuário escolheu o modo leve")
+                switchToLightMode()
+            }
+            .setNegativeButton("Continuar assim", null)
+            .show()
+    }
+
+    /** Troca para o modo leve sem fechar o player (o mpv reinicia só a saída de vídeo). */
+    private fun switchToLightMode() {
+        mode = 3
+        vo = "mediacodec_embed"
+        try {
+            MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING)
+            subView.visibility = View.VISIBLE
+            MPVLib.setPropertyString("hwdec", "mediacodec")
+            MPVLib.setPropertyString("vo", vo)
+            lastDrops = (MPVLib.getPropertyInt("frame-drop-count") ?: 0) + (MPVLib.getPropertyInt("decoder-frame-drop-count") ?: 0)
+            showOsd("Modo leve ativado")
+        } catch (e: Throwable) {
+            PlayerLog.add("player: falha ao trocar de modo: $e")
+            showOsd("Modo leve vale a partir do próximo episódio")
         }
     }
 
@@ -236,13 +295,21 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         MPVLib.setOptionString("gpu-shader-cache-dir", cache.path)
         MPVLib.setOptionString("icc-cache-dir", cache.path)
         MPVLib.setOptionString("profile", "fast")
-        MPVLib.setOptionString("vo", "gpu")
+        mode = Prefs(this).videoMode
+        vo = if (mode == 3) "mediacodec_embed" else "gpu"
+        MPVLib.setOptionString("vo", vo)
+        if (mode != 3) {
+            // Atalhos para placas de vídeo fracas (TVs): desenho direto, sem etapas extras.
+            MPVLib.setOptionString("gpu-dumb-mode", "yes")
+            MPVLib.setOptionString("opengl-pbo", "yes")
+            MPVLib.setOptionString("dither", "no")
+        }
+        MPVLib.setOptionString("video-sync", "audio")
         MPVLib.setOptionString("gpu-context", "android")
         MPVLib.setOptionString("opengl-es", "yes")
         MPVLib.setOptionString("ao", "audiotrack,opensles")
-        val mode = Prefs(this).videoMode
-        PlayerLog.add("mpv: modo de vídeo $mode")
-        MPVLib.setOptionString("hwdec", when (mode) { 0 -> "mediacodec,mediacodec-copy"; 1 -> "mediacodec-copy"; else -> "no" })
+        PlayerLog.add("mpv: modo de vídeo $mode (vo=$vo)")
+        MPVLib.setOptionString("hwdec", when (mode) { 0 -> "mediacodec,mediacodec-copy"; 1 -> "mediacodec-copy"; 2 -> "no"; else -> "mediacodec" })
         MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         MPVLib.setOptionString("cache", "yes")
         MPVLib.setOptionString("cache-pause-initial", "yes")
@@ -261,6 +328,11 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         MPVLib.init()
         MPVLib.addObserver(this)
         MPVLib.addLogObserver(this)
+        if (mode == 3) {
+            subView.visibility = View.VISIBLE
+            MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING)
+        }
+        intent.getLongExtra(EXTRA_START, 0L).takeIf { it > 0 }?.let { MPVLib.setOptionString("start", it.toString()) }
         MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_INT64)
         MPVLib.observeProperty("duration", MPVLib.MPV_FORMAT_INT64)
         MPVLib.observeProperty("pause", MPVLib.MPV_FORMAT_FLAG)
@@ -303,7 +375,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         if (!mpvReady) return
         MPVLib.attachSurface(holder.surface)
         MPVLib.setOptionString("force-window", "yes")
-        MPVLib.setOptionString("vo", "gpu")
+        MPVLib.setOptionString("vo", vo)
         pendingUrl?.let { MPVLib.command(arrayOf("loadfile", it)) }
         pendingUrl = null
     }
@@ -322,7 +394,9 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
 
     // Eventos do mpv chegam em outra thread.
     override fun eventProperty(property: String) {}
-    override fun eventProperty(property: String, value: String) {}
+    override fun eventProperty(property: String, value: String) {
+        if (property == "sub-text") ui.post { subView.text = value }
+    }
     override fun eventProperty(property: String, value: Double) {}
 
     override fun eventProperty(property: String, value: Long) {
@@ -417,5 +491,6 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         const val EXTRA_MAGNET = "magnet"
         const val EXTRA_TITLE = "title"
         const val EXTRA_EPISODE = "episode"
+        const val EXTRA_START = "start"
     }
 }
