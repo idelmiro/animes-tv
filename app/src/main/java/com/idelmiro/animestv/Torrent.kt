@@ -94,6 +94,11 @@ class TorrentStream(
     private val episode: Int,
     private val onStatus: (Status) -> Unit,
     private val onReady: (String) -> Unit,
+    /**
+     * Arquivo maior que o limite: pergunta se baixa mesmo assim, apagando os episódios salvos.
+     * Recebe o tamanho, quantos episódios estão salvos e quanto ocupam; chame answer(true/false).
+     */
+    private val onOversize: (size: Long, savedCount: Int, savedBytes: Long, answer: (Boolean) -> Unit) -> Unit,
 ) {
     enum class Phase { METADATA, SPACE, CONNECTING, DOWNLOADING, COMPLETE, ERROR }
 
@@ -172,11 +177,27 @@ class TorrentStream(
             }
 
             status(Status(Phase.SPACE, "Arquivo de ${Downloads.human(fileSize)}. Conferindo o espaço…", total = fileSize))
+            val removed: Int
             if (fileSize > Downloads.CAP) {
-                fail("Este arquivo tem ${Downloads.human(fileSize)}, mais que o limite de 1 GB. Escolha um lançamento menor (por exemplo, 720p ou HEVC).")
-                return
+                // Acima do limite: só baixa se o usuário confirmar, e aí apaga todos os salvos.
+                val others = (Downloads.root(ctx).listFiles() ?: emptyArray()).filter { it.isDirectory && it != d }
+                val savedCount = others.count { Downloads.completed(it) != null }
+                val savedBytes = others.sumOf { Downloads.size(it) }
+                status(Status(Phase.SPACE, "O arquivo tem ${Downloads.human(fileSize)}, mais que o limite de 1 GB. Aguardando sua confirmação…", total = fileSize))
+                val latch = java.util.concurrent.CountDownLatch(1)
+                var ok = false
+                onOversize(fileSize, savedCount, savedBytes) { yes -> ok = yes; latch.countDown() }
+                while (!closed && !latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) { }
+                if (closed) return
+                if (!ok) {
+                    fail("Download cancelado: o arquivo tem ${Downloads.human(fileSize)}, mais que o limite de 1 GB.")
+                    return
+                }
+                others.forEach { it.deleteRecursively() }
+                removed = savedCount
+            } else {
+                removed = Downloads.makeRoom(ctx, fileSize, d)
             }
-            val removed = Downloads.makeRoom(ctx, fileSize, d)
             d.mkdirs()
             val free = StatFs(d.absolutePath).availableBytes
             if (free < fileSize + 50L * 1024 * 1024) {

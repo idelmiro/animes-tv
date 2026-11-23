@@ -455,7 +455,7 @@ class MainActivity : Activity() {
                 val shown = results.take(12)
                 val labels = shown.map { r ->
                     val kind = if (r.batch) " • pacote" else ""
-                    val big = if (!r.batch && tooBig(r.size)) " • maior que 1 GB" else ""
+                    val big = if (!r.batch && tooBig(r.size)) " • maior que 1 GB (vai pedir confirmação)" else ""
                     "${r.seeders} seeds • ${r.size}$big • PT-BR no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
                 dialog().setTitle("${a.anime.title} — Ep. $episode")

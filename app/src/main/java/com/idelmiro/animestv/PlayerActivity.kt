@@ -62,7 +62,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         startMpv()
         torrent = TorrentStream(applicationContext, magnet, episode,
             onStatus = { s -> ui.post { onTorrent(s) } },
-            onReady = { url -> ui.post { load(url) } }
+            onReady = { url -> ui.post { load(url) } },
+            onOversize = { size, count, bytes, answer -> ui.post { askOversize(size, count, bytes, answer) } }
         ).also { it.start() }
         updatePanel()
     }
@@ -146,6 +147,23 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, SurfaceHolder.Callback 
         }
         if (mpvReady && started && duration > 0) sb.append("\n\n${time(position)} / ${time(duration)}")
         panelText.text = sb
+    }
+
+    /** Arquivo acima de 1 GB: pergunta antes, avisando o que será apagado. */
+    private fun askOversize(size: Long, count: Int, bytes: Long, answer: (Boolean) -> Unit) {
+        if (isFinishing) { answer(false); return }
+        val saved = if (count > 0)
+            "Para caber, os $count episódio(s) salvos (${Downloads.human(bytes)}) serão apagados."
+        else "Não há outros episódios salvos para apagar."
+        var answered = false
+        val reply = { yes: Boolean -> if (!answered) { answered = true; answer(yes) } }
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Arquivo maior que 1 GB")
+            .setMessage("Este episódio tem ${Downloads.human(size)}, acima do limite de 1 GB.\n\n$saved\n\nBaixar mesmo assim?")
+            .setPositiveButton("Baixar mesmo assim") { _, _ -> reply(true) }
+            .setNegativeButton("Cancelar") { _, _ -> reply(false) }
+            .setOnCancelListener { reply(false) }
+            .show()
     }
 
     private fun speed(bps: Int) = if (bps >= 1024 * 1024)
