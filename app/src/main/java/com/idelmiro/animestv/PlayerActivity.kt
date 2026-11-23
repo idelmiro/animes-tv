@@ -77,6 +77,12 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         val d = resources.displayMetrics.density
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surface = SurfaceView(this)
+        // Em TV 4K, desenhar o vídeo na resolução da tela pesa demais para a placa de vídeo.
+        // O player desenha em no máximo 1920x1080 e a própria TV amplia a imagem.
+        val dm = resources.displayMetrics
+        val w = maxOf(dm.widthPixels, dm.heightPixels)
+        val h = minOf(dm.widthPixels, dm.heightPixels)
+        if (w > 1920) surface.holder.setFixedSize(1920, h * 1920 / w)
         root.addView(surface, FrameLayout.LayoutParams(-1, -1))
 
         panel = LinearLayout(this).apply {
@@ -149,6 +155,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             }
         }
         if (mpvReady && started && duration > 0) sb.append("\n\n${time(position)} / ${time(duration)}")
+        if (mpvReady && started && showDetails) sb.append("\n").append(playbackStats())
         panelText.text = sb
     }
 
@@ -169,12 +176,43 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             .show()
     }
 
+    /** Números do player para entender travadas: decodificador, quadros perdidos, buffer. */
+    private fun playbackStats(): String {
+        fun str(p: String) = try { MPVLib.getPropertyString(p) } catch (_: Throwable) { null }
+        fun int(p: String) = try { MPVLib.getPropertyInt(p) } catch (_: Throwable) { null }
+        fun dbl(p: String) = try { MPVLib.getPropertyDouble(p) } catch (_: Throwable) { null }
+        val hw = str("hwdec-current")?.takeIf { it.isNotBlank() && it != "no" } ?: "software"
+        val vw = int("width"); val vh = int("height")
+        val fps = dbl("estimated-vf-fps")?.let { String.format(Locale.US, "%.1f", it) } ?: "?"
+        val cont = dbl("container-fps")?.let { String.format(Locale.US, "%.0f", it) } ?: "?"
+        val drop = (int("frame-drop-count") ?: 0) + (int("decoder-frame-drop-count") ?: 0)
+        val cache = dbl("demuxer-cache-duration")?.let { "${it.toInt()} s" } ?: "?"
+        val osd = str("osd-dimensions/w")?.let { w -> "${w}x${str("osd-dimensions/h")}" } ?: "?"
+        return "Vídeo ${vw}x$vh • decodificação: $hw • $fps de $cont quadros/s\n" +
+            "Quadros perdidos: $drop • buffer: $cache • tela de desenho: $osd"
+    }
+
+    private val statsLogger = object : Runnable {
+        override fun run() {
+            if (mpvReady && started) PlayerLog.add("stats: " + playbackStats().replace("\n", " | "))
+            ui.postDelayed(this, 15000)
+        }
+    }
+
     private fun speed(bps: Int) = if (bps >= 1024 * 1024)
         String.format(Locale("pt", "BR"), "%.1f MB/s", bps / 1048576.0)
     else "${bps / 1024} KB/s"
 
     private fun time(s: Long) = if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
     else String.format("%d:%02d", s / 60, s % 60)
+
+    private val detailsTicker = object : Runnable {
+        override fun run() {
+            if (!showDetails) return
+            updatePanel()
+            ui.postDelayed(this, 1000)
+        }
+    }
 
     private val hideOsd = Runnable { osd.visibility = View.GONE }
 
@@ -311,7 +349,10 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         PlayerLog.add("mpv: evento $eventId")
         ui.post {
             when (eventId) {
-                MPVLib.MPV_EVENT_PLAYBACK_RESTART -> { started = true; buffering = false; updatePanel() }
+                MPVLib.MPV_EVENT_PLAYBACK_RESTART -> {
+                    if (!started) ui.postDelayed(statsLogger, 5000)
+                    started = true; buffering = false; updatePanel()
+                }
                 MPVLib.MPV_EVENT_END_FILE -> if (!started) {
                     panelText.text = "O player não conseguiu abrir o vídeo.\n\nAperte Voltar para sair."
                     spinner.visibility = View.GONE
@@ -346,6 +387,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 showDetails = !showDetails
                 updatePanel()
+                if (showDetails) ui.post(detailsTicker)
             }
             else -> return super.onKeyDown(keyCode, event)
         }

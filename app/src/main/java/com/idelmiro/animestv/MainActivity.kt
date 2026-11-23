@@ -540,6 +540,7 @@ class MainActivity : Activity() {
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
             "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
             "Player dos episódios do Nyaa: ${if (prefs.useAmnis) "Amnis" else "Animes TV"}",
+            "Modo de vídeo do player: ${videoModeName(prefs.videoMode)}",
             "Downloads: ${Downloads.count(this)} episódio(s), ${Downloads.human(Downloads.used(this))} de 1 GB",
             "Atualizar o canal \"Animes de hoje\" agora",
             "Diagnóstico",
@@ -558,7 +559,15 @@ class MainActivity : Activity() {
                     prefs.useAmnis = !prefs.useAmnis
                     toast(if (prefs.useAmnis) "Episódios do Nyaa vão abrir no Amnis" else "Episódios do Nyaa vão tocar no próprio Animes TV")
                 }
-                3 -> dialog().setTitle("Downloads")
+                3 -> {
+                    val labels = (0..2).map { videoModeName(it) }.toTypedArray()
+                    dialog().setTitle("Modo de vídeo").setSingleChoiceItems(labels, prefs.videoMode) { d, which ->
+                        prefs.videoMode = which
+                        d.dismiss()
+                        toast("Modo de vídeo: ${videoModeName(which)}")
+                    }.show()
+                }
+                4 -> dialog().setTitle("Downloads")
                     .setMessage("Os episódios baixados ficam guardados até o limite de 1 GB; os mais antigos são apagados " +
                         "automaticamente antes de cada novo download.\n\nOcupado agora: ${Downloads.human(Downloads.used(this))} " +
                         "em ${Downloads.count(this)} episódio(s).")
@@ -567,12 +576,12 @@ class MainActivity : Activity() {
                         toast("Downloads apagados.")
                     }
                     .setNegativeButton("Fechar", null).show()
-                4 -> {
+                5 -> {
                     HomeWorker.runNow(this)
                     toast("Publicando… confira o resultado em Diagnóstico daqui a alguns segundos.")
                 }
-                5 -> showDiagnostics()
-                6 -> checkUpdate()
+                6 -> showDiagnostics()
+                7 -> checkUpdate()
             }
         }.show()
     }
@@ -621,6 +630,12 @@ class MainActivity : Activity() {
         val b = dialog().setTitle("Diagnóstico").setMessage(text).setPositiveButton("OK", null)
         PlayerLog.last(this)?.let { log -> b.setNeutralButton("Registro do player") { _, _ -> showPlayerLog(log, crashed = false) } }
         b.show()
+    }
+
+    private fun videoModeName(m: Int) = when (m) {
+        0 -> "hardware (padrão)"
+        1 -> "hardware com cópia"
+        else -> "só processador (mais pesado)"
     }
 
     /** Mostra o registro do player (as últimas linhas, que dizem onde parou). */
