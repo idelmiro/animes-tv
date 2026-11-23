@@ -434,7 +434,8 @@ class MainActivity : Activity() {
     private fun onOtherServiceClick(a: Airing) {
         val fav = prefs.isFav(a.anime.id)
         val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "▶ Buscar episódio ${a.episode} legendado (PT-BR)" to { searchNyaa(a, a.episode) }
+        val isSaved = Downloads.savedFor(this, a.anime.id, a.episode).isNotEmpty()
+        actions += (if (isSaved) "▶ Assistir episódio ${a.episode} (já baixado)" else "▶ Buscar episódio ${a.episode} legendado (PT-BR)") to { searchNyaa(a, a.episode) }
         if (a.episode > 1) actions += "Episódios anteriores…" to { chooseEarlierEpisode(a) }
         for (st in a.anime.streams) actions += "Abrir no ${st.site}" to { openUrl(st.url) }
         actions += (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
@@ -448,7 +449,8 @@ class MainActivity : Activity() {
     /** Segunda janela: lista os episódios anteriores (do mais recente para o primeiro). */
     private fun chooseEarlierEpisode(a: Airing) {
         val eps = (a.episode - 1 downTo maxOf(1, a.episode - 60)).toList()
-        val labels = eps.map { "Episódio $it" }.toTypedArray()
+        val have = Downloads.saved(this).filter { it.animeId == a.anime.id }.map { it.episode }.toSet()
+        val labels = eps.map { if (it in have) "Episódio $it • baixado" else "Episódio $it" }.toTypedArray()
         dialog().setTitle("${a.anime.title} — episódios anteriores")
             .setItems(labels) { _, which -> searchNyaa(a, eps[which]) }
             .setNegativeButton("Voltar") { _, _ -> onOtherServiceClick(a) }
@@ -479,7 +481,35 @@ class MainActivity : Activity() {
         return Progress(b.show(), text)
     }
 
+    /** Antes de buscar no Nyaa, vê se o episódio já está baixado e oferece tocar direto. */
     private fun searchNyaa(a: Airing, episode: Int) {
+        val saved = Downloads.savedFor(this, a.anime.id, episode)
+        if (saved.isEmpty() || prefs.useAmnis) {
+            searchNyaaNow(a, episode)
+            return
+        }
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        for (sv in saved) actions += "▶ Assistir o baixado (${Downloads.human(sv.size)})\n${sv.release}" to { playSaved(a, episode, sv) }
+        actions += "Buscar outra versão no Nyaa" to { searchNyaaNow(a, episode) }
+        actions += (if (saved.size > 1) "Apagar os baixados deste episódio" else "Apagar o baixado") to {
+            saved.forEach { it.dir.deleteRecursively() }
+            toast("Apagado.")
+        }
+        dialog().setTitle("${a.anime.title} — Ep. $episode já está baixado")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved) {
+        startActivity(Intent(this, PlayerActivity::class.java)
+            .putExtra(PlayerActivity.EXTRA_LOCAL_FILE, sv.video.absolutePath)
+            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+            .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
+            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id))
+    }
+
+    private fun searchNyaaNow(a: Airing, episode: Int) {
         var job: Job? = null
         val prog = progressDialog("${a.anime.title} — Ep. $episode", "Preparando a busca…") { job?.cancel() }
         job = scope.launch {
@@ -504,7 +534,7 @@ class MainActivity : Activity() {
                 val shown = results.take(12)
                 val labels = shown.map { r ->
                     val kind = if (r.batch) " • pacote" else ""
-                    val big = if (!r.batch && tooBig(r.size)) " • maior que 1 GB (vai pedir confirmação)" else ""
+                    val big = if (!r.batch && tooBig(r.size)) " • maior que ${Downloads.capLabel(this@MainActivity)} (vai pedir confirmação)" else ""
                     "${r.seeders} seeds • ${r.size}$big • PT-BR no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
                 dialog().setTitle("${a.anime.title} — Ep. $episode")
@@ -514,7 +544,9 @@ class MainActivity : Activity() {
                         else startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
                             .putExtra(PlayerActivity.EXTRA_MAGNET, r.magnet)
                             .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
-                            .putExtra(PlayerActivity.EXTRA_EPISODE, episode))
+                            .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
+                            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+                            .putExtra(PlayerActivity.EXTRA_RELEASE, r.title))
                     }
                     .setNegativeButton("Fechar", null)
                     .show()
@@ -532,7 +564,7 @@ class MainActivity : Activity() {
     /** Tamanho do Nyaa ("1.4 GiB", "650.2 MiB") passa do limite de downloads? */
     private fun tooBig(size: String): Boolean {
         val m = Regex("""([\d.]+)\s*GiB""").find(size) ?: return false
-        return (m.groupValues[1].toDoubleOrNull() ?: 0.0) * 1073741824.0 > Downloads.CAP
+        return (m.groupValues[1].toDoubleOrNull() ?: 0.0) * 1073741824.0 > Downloads.cap(this)
     }
 
     /**
@@ -580,7 +612,7 @@ class MainActivity : Activity() {
             "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
             "Player dos episódios do Nyaa: ${if (prefs.useAmnis) "Amnis" else "Animes TV"}",
             "Modo de vídeo do player: ${videoModeName(prefs.videoMode)}",
-            "Downloads: ${Downloads.count(this)} episódio(s), ${Downloads.human(Downloads.used(this))} de 1 GB",
+            "Downloads: ${Downloads.count(this)} episódio(s), ${Downloads.human(Downloads.used(this))} de ${Downloads.capLabel(this)} • ${Downloads.locationName(this)}",
             "Atualizar o canal \"Animes de hoje\" agora",
             "Diagnóstico",
             "Verificar atualização (versão ${BuildConfig.VERSION_CODE})"
@@ -606,15 +638,7 @@ class MainActivity : Activity() {
                         toast("Modo de vídeo: ${videoModeName(which)}")
                     }.show()
                 }
-                4 -> dialog().setTitle("Downloads")
-                    .setMessage("Os episódios baixados ficam guardados até o limite de 1 GB; os mais antigos são apagados " +
-                        "automaticamente antes de cada novo download.\n\nOcupado agora: ${Downloads.human(Downloads.used(this))} " +
-                        "em ${Downloads.count(this)} episódio(s).")
-                    .setPositiveButton("Apagar todos") { _, _ ->
-                        Downloads.clearAll(this)
-                        toast("Downloads apagados.")
-                    }
-                    .setNegativeButton("Fechar", null).show()
+                4 -> showDownloads()
                 5 -> {
                     HomeWorker.runNow(this)
                     toast("Publicando… confira o resultado em Diagnóstico daqui a alguns segundos.")
@@ -623,6 +647,65 @@ class MainActivity : Activity() {
                 7 -> checkUpdate()
             }
         }.show()
+    }
+
+    // ---------- downloads: local e limite ----------
+
+    private fun showDownloads() {
+        val ok = Downloads.available(this)
+        val msg = "Local: ${Downloads.locationName(this)}\nLimite: ${Downloads.capLabel(this)}\n" +
+            (if (ok) "Ocupado agora: ${Downloads.human(Downloads.used(this))} em ${Downloads.count(this)} episódio(s)."
+            else "O pendrive escolhido não está conectado.") +
+            "\n\nQuando um novo download não cabe no limite, os episódios usados há mais tempo são apagados primeiro."
+        dialog().setTitle("Downloads").setMessage(msg)
+            .setPositiveButton("Local e limite") { _, _ -> chooseDownloadLocation() }
+            .setNeutralButton("Apagar todos") { _, _ ->
+                Downloads.clearAll(this)
+                toast("Downloads apagados.")
+            }
+            .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun chooseDownloadLocation() {
+        val vols = Downloads.volumes(this)
+        val current = prefs.downloadPath
+        val labels = vols.map { "${it.name}: ${Downloads.human(it.free)} livres de ${Downloads.human(it.total)}" }.toTypedArray()
+        val sel = vols.indexOfFirst { (if (it.removable) it.path.absolutePath else null) == current }
+        dialog().setTitle("Onde guardar os downloads").setSingleChoiceItems(labels, sel) { d, which ->
+            d.dismiss()
+            val v = vols[which]
+            val newPath = if (v.removable) v.path.absolutePath else null
+            if (newPath == current) { chooseCap(v); return@setSingleChoiceItems }
+            val n = Downloads.count(this)
+            val apply = {
+                Downloads.clearAll(this)
+                prefs.downloadPath = newPath
+                chooseCap(v)
+            }
+            if (n == 0) apply() else dialog().setTitle("Trocar o local")
+                .setMessage("Os $n episódio(s) guardados em ${Downloads.locationName(this)} (${Downloads.human(Downloads.used(this))}) serão apagados. Continuar?")
+                .setPositiveButton("Trocar") { _, _ -> apply() }
+                .setNegativeButton("Cancelar", null).show()
+        }.setNegativeButton("Voltar", null).show()
+    }
+
+    private fun chooseCap(v: Downloads.Volume) {
+        // Só oferece limites que cabem no espaço livre (somado ao que os downloads já ocupam).
+        val room = v.free + Downloads.used(this)
+        val options = intArrayOf(1, 2, 3, 5, 10, 15, 20).filter { it * 1073741824L <= room - 200L * 1024 * 1024 }
+        if (options.isEmpty()) {
+            toast("Esse local tem pouco espaço livre (${Downloads.human(v.free)}).")
+            return
+        }
+        val labels = options.map { "$it GB" }.toTypedArray()
+        dialog().setTitle("Limite dos downloads em ${v.name}")
+            .setSingleChoiceItems(labels, options.indexOf(prefs.downloadCapGb)) { d, which ->
+                prefs.downloadCapGb = options[which]
+                // Se o limite diminuiu, já apaga os mais antigos até caber.
+                Downloads.makeRoom(this, 0, java.io.File(""))
+                d.dismiss()
+                toast("Downloads em ${v.name}, até ${options[which]} GB.")
+            }.show()
     }
 
     private fun chooseOffset() {

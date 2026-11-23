@@ -23,19 +23,57 @@ import java.net.URLEncoder
 import java.util.Locale
 
 /**
- * Pasta de downloads com limite de espaço. Cada episódio fica em uma subpasta própria;
- * o arquivo ".pronto" marca um download completo e guarda o caminho do vídeo.
+ * Pasta de downloads com limite de espaço, na memória interna ou num pendrive/cartão.
+ * Cada episódio fica em uma subpasta própria; ".pronto" marca um download completo (e guarda
+ * o caminho do vídeo) e ".info" guarda de qual anime/episódio ele é.
  */
 object Downloads {
-    /** Limite total: 1 GB. */
-    const val CAP = 1024L * 1024 * 1024
+    private const val GB = 1024L * 1024 * 1024
 
-    fun root(ctx: Context): File =
-        File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "downloads").apply { mkdirs() }
+    /** Um lugar onde dá para guardar downloads (memória interna ou pendrive/cartão). */
+    data class Volume(val path: File, val name: String, val removable: Boolean, val free: Long, val total: Long)
+
+    /** Memória interna e pendrives/cartões conectados que o app consegue usar. */
+    fun volumes(ctx: Context): List<Volume> {
+        val sm = ctx.getSystemService(Context.STORAGE_SERVICE) as android.os.storage.StorageManager
+        return ctx.getExternalFilesDirs(null).filterNotNull().mapNotNull { dir ->
+            try {
+                dir.mkdirs()
+                val st = StatFs(dir.absolutePath)
+                val removable = android.os.Environment.isExternalStorageRemovable(dir)
+                val desc = sm.getStorageVolume(dir)?.getDescription(ctx)
+                val name = if (!removable) "Memória interna" else (desc ?: "Pendrive/cartão")
+                Volume(dir, name, removable, st.availableBytes, st.totalBytes)
+            } catch (_: Throwable) { null }
+        }
+    }
+
+    /** Limite total escolhido em Ajustes (padrão 1 GB). */
+    fun cap(ctx: Context): Long = Prefs(ctx).downloadCapGb * GB
+
+    fun capLabel(ctx: Context) = "${Prefs(ctx).downloadCapGb} GB"
+
+    /** O local escolhido está acessível? (falso se o pendrive foi desconectado) */
+    fun available(ctx: Context): Boolean {
+        val p = Prefs(ctx).downloadPath ?: return true
+        val f = File(p)
+        return f.exists() && f.canWrite()
+    }
+
+    fun locationName(ctx: Context): String {
+        val p = Prefs(ctx).downloadPath ?: return "Memória interna"
+        return volumes(ctx).firstOrNull { it.path.absolutePath == p }?.name ?: "Pendrive (desconectado)"
+    }
+
+    fun root(ctx: Context): File {
+        val base = Prefs(ctx).downloadPath?.let { File(it) } ?: (ctx.getExternalFilesDir(null) ?: ctx.filesDir)
+        return File(base, "downloads").apply { mkdirs() }
+    }
 
     fun dirFor(ctx: Context, hash: String, fileIndex: Int) = File(root(ctx), "$hash-$fileIndex")
 
     private fun marker(dir: File) = File(dir, ".pronto")
+    private fun info(dir: File) = File(dir, ".info")
 
     /** Vídeo já baixado por completo, se existir. */
     fun completed(dir: File): File? {
@@ -46,14 +84,49 @@ object Downloads {
 
     fun markDone(dir: File, video: File) {
         marker(dir).writeText(video.absolutePath)
-        dir.setLastModified(System.currentTimeMillis())
+        touch(dir)
     }
+
+    /** Marca como usado agora (o mais antigo é o primeiro a ser apagado). */
+    fun touch(dir: File) {
+        val now = System.currentTimeMillis()
+        marker(dir).takeIf { it.exists() }?.setLastModified(now)
+        dir.setLastModified(now)
+    }
+
+    private fun lastUse(dir: File) = marker(dir).takeIf { it.exists() }?.lastModified() ?: dir.lastModified()
+
+    /** Guarda de qual anime/episódio é o download, para achar depois sem buscar no Nyaa. */
+    fun writeInfo(dir: File, animeId: Int, title: String, episode: Int, release: String, size: Long) {
+        try {
+            info(dir).writeText(org.json.JSONObject()
+                .put("animeId", animeId).put("title", title).put("episode", episode)
+                .put("release", release).put("size", size).toString())
+        } catch (_: Throwable) {
+        }
+    }
+
+    data class Saved(val dir: File, val video: File, val animeId: Int, val episode: Int, val release: String, val size: Long)
+
+    /** Episódios completos já baixados (com a informação de anime/episódio). */
+    fun saved(ctx: Context): List<Saved> {
+        if (!available(ctx)) return emptyList()
+        return (root(ctx).listFiles() ?: emptyArray()).mapNotNull { d ->
+            val v = completed(d) ?: return@mapNotNull null
+            try {
+                val o = org.json.JSONObject(info(d).readText())
+                Saved(d, v, o.getInt("animeId"), o.getInt("episode"), o.optString("release", v.name), v.length())
+            } catch (_: Throwable) { null }
+        }
+    }
+
+    fun savedFor(ctx: Context, animeId: Int, episode: Int) = saved(ctx).filter { it.animeId == animeId && it.episode == episode }
 
     fun size(f: File): Long = if (f.isDirectory) (f.listFiles() ?: emptyArray()).sumOf { size(it) } else f.length()
 
-    fun used(ctx: Context): Long = size(root(ctx))
+    fun used(ctx: Context): Long = if (available(ctx)) size(root(ctx)) else 0L
 
-    fun count(ctx: Context): Int = root(ctx).listFiles()?.count { it.isDirectory && completed(it) != null } ?: 0
+    fun count(ctx: Context): Int = if (!available(ctx)) 0 else root(ctx).listFiles()?.count { it.isDirectory && completed(it) != null } ?: 0
 
     fun clearAll(ctx: Context) {
         root(ctx).listFiles()?.forEach { it.deleteRecursively() }
@@ -61,17 +134,18 @@ object Downloads {
 
     /**
      * Libera espaço para um arquivo de [need] bytes: primeiro apaga downloads incompletos,
-     * depois os episódios mais antigos, até caber no limite. Devolve quantos apagou.
+     * depois os episódios usados há mais tempo, até caber no limite. Devolve quantos apagou.
      */
     fun makeRoom(ctx: Context, need: Long, keep: File): Int {
         var removed = 0
+        val limit = cap(ctx)
         val dirs = (root(ctx).listFiles() ?: emptyArray()).filter { it.isDirectory && it != keep }
         for (d in dirs.filter { completed(it) == null }) {
             d.deleteRecursively(); removed++
         }
-        val done = dirs.filter { it.exists() }.sortedBy { it.lastModified() }
+        val done = dirs.filter { it.exists() }.sortedBy { lastUse(it) }
         for (d in done) {
-            if (used(ctx) + need <= CAP) break
+            if (used(ctx) + need <= limit) break
             d.deleteRecursively(); removed++
         }
         return removed
@@ -93,6 +167,9 @@ class TorrentStream(
     private val ctx: Context,
     private val magnet: String,
     private val episode: Int,
+    private val animeId: Int,
+    private val animeTitle: String,
+    private val release: String,
     private val onStatus: (Status) -> Unit,
     private val onReady: (String) -> Unit,
     /**
@@ -176,6 +253,10 @@ class TorrentStream(
             lastPiece = ((fileOffset + fileSize - 1) / pieceLength).toInt()
             val hash = ti.infoHash().toHex()
             infoHash = ti.infoHash()
+            if (!Downloads.available(ctx)) {
+                fail("O pendrive escolhido para os downloads não foi encontrado. Conecte-o de novo ou mude o local em Ajustes → Downloads.")
+                return
+            }
             val d = Downloads.dirFor(ctx, hash, idx)
             dir = d
 
@@ -183,7 +264,7 @@ class TorrentStream(
             Downloads.completed(d)?.let { f ->
                 complete = true
                 video = f
-                d.setLastModified(System.currentTimeMillis())
+                Downloads.touch(d)
                 status(Status(Phase.COMPLETE, "Episódio já estava baixado. Tocando sem usar a internet.", done = f.length(), total = f.length()))
                 stopSession()
                 onReady(f.absolutePath)
@@ -192,19 +273,21 @@ class TorrentStream(
 
             status(Status(Phase.SPACE, "Arquivo de ${Downloads.human(fileSize)}. Conferindo o espaço…", total = fileSize))
             val removed: Int
-            if (fileSize > Downloads.CAP) {
+            val cap = Downloads.cap(ctx)
+            val capLabel = Downloads.capLabel(ctx)
+            if (fileSize > cap) {
                 // Acima do limite: só baixa se o usuário confirmar, e aí apaga todos os salvos.
                 val others = (Downloads.root(ctx).listFiles() ?: emptyArray()).filter { it.isDirectory && it != d }
                 val savedCount = others.count { Downloads.completed(it) != null }
                 val savedBytes = others.sumOf { Downloads.size(it) }
-                status(Status(Phase.SPACE, "O arquivo tem ${Downloads.human(fileSize)}, mais que o limite de 1 GB. Aguardando sua confirmação…", total = fileSize))
+                status(Status(Phase.SPACE, "O arquivo tem ${Downloads.human(fileSize)}, mais que o limite de $capLabel. Aguardando sua confirmação…", total = fileSize))
                 val latch = java.util.concurrent.CountDownLatch(1)
                 var ok = false
                 onOversize(fileSize, savedCount, savedBytes) { yes -> ok = yes; latch.countDown() }
                 while (!closed && !latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) { }
                 if (closed) return
                 if (!ok) {
-                    fail("Download cancelado: o arquivo tem ${Downloads.human(fileSize)}, mais que o limite de 1 GB.")
+                    fail("Download cancelado: o arquivo tem ${Downloads.human(fileSize)}, mais que o limite de $capLabel.")
                     return
                 }
                 others.forEach { it.deleteRecursively() }
@@ -213,6 +296,7 @@ class TorrentStream(
                 removed = Downloads.makeRoom(ctx, fileSize, d)
             }
             d.mkdirs()
+            Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize)
             val free = StatFs(d.absolutePath).availableBytes
             if (free < fileSize + 50L * 1024 * 1024) {
                 fail("A TV não tem espaço livre suficiente (${Downloads.human(free)} livres, o episódio tem ${Downloads.human(fileSize)}).")
