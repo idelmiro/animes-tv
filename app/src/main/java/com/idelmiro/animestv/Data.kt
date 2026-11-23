@@ -66,11 +66,12 @@ class Prefs(context: Context) {
     /**
      * Modo de vídeo do player: 0 = decodificação de vídeo direta pelo hardware;
      * 1 = hardware com cópia (mais compatível); 2 = só software (mais pesado, mas sem
-     * depender do decodificador da TV). Sobe sozinho se o player fechar ao abrir um vídeo.
+     * depender do decodificador da TV); 3 = leve: o vídeo vai direto do decodificador para a
+     * tela (sem passar pela placa de vídeo) e a legenda é mostrada como texto simples.
      */
     var videoMode: Int
         get() = sp.getInt("videoMode2", 0)
-        set(v) = sp.edit().putInt("videoMode2", v.coerceIn(0, 2)).apply()
+        set(v) = sp.edit().putInt("videoMode2", v.coerceIn(0, 3)).apply()
 
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)
