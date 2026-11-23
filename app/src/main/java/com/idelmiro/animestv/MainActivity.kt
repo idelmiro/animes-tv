@@ -455,10 +455,18 @@ class MainActivity : Activity() {
                 val shown = results.take(12)
                 val labels = shown.map { r ->
                     val kind = if (r.batch) " • pacote" else ""
-                    "${r.seeders} seeds • ${r.size} • PT-BR no ${r.via}$kind\n${r.title}"
+                    val big = if (!r.batch && tooBig(r.size)) " • maior que 1 GB" else ""
+                    "${r.seeders} seeds • ${r.size}$big • PT-BR no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
                 dialog().setTitle("${a.anime.title} — Ep. $episode")
-                    .setItems(labels) { _, which -> openInAmnis(shown[which], episode) }
+                    .setItems(labels) { _, which ->
+                        val r = shown[which]
+                        if (prefs.useAmnis) openInAmnis(r, episode)
+                        else startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
+                            .putExtra(PlayerActivity.EXTRA_MAGNET, r.magnet)
+                            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+                            .putExtra(PlayerActivity.EXTRA_EPISODE, episode))
+                    }
                     .setNegativeButton("Fechar", null)
                     .show()
             } catch (e: CancellationException) {
@@ -470,6 +478,12 @@ class MainActivity : Activity() {
                     .setPositiveButton("OK", null).show()
             }
         }
+    }
+
+    /** Tamanho do Nyaa ("1.4 GiB", "650.2 MiB") passa do limite de downloads? */
+    private fun tooBig(size: String): Boolean {
+        val m = Regex("""([\d.]+)\s*GiB""").find(size) ?: return false
+        return (m.groupValues[1].toDoubleOrNull() ?: 0.0) * 1073741824.0 > Downloads.CAP
     }
 
     /**
@@ -515,6 +529,8 @@ class MainActivity : Activity() {
         val options = arrayOf(
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
             "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
+            "Player dos episódios do Nyaa: ${if (prefs.useAmnis) "Amnis" else "Animes TV"}",
+            "Downloads: ${Downloads.count(this)} episódio(s), ${Downloads.human(Downloads.used(this))} de 1 GB",
             "Atualizar o canal \"Animes de hoje\" agora",
             "Diagnóstico",
             "Verificar atualização (versão ${BuildConfig.VERSION_CODE})"
@@ -529,11 +545,24 @@ class MainActivity : Activity() {
                     toast(if (prefs.onlyCrunchyroll) "Mostrando só animes do Crunchyroll" else "Mostrando animes de todos os serviços")
                 }
                 2 -> {
+                    prefs.useAmnis = !prefs.useAmnis
+                    toast(if (prefs.useAmnis) "Episódios do Nyaa vão abrir no Amnis" else "Episódios do Nyaa vão tocar no próprio Animes TV")
+                }
+                3 -> dialog().setTitle("Downloads")
+                    .setMessage("Os episódios baixados ficam guardados até o limite de 1 GB; os mais antigos são apagados " +
+                        "automaticamente antes de cada novo download.\n\nOcupado agora: ${Downloads.human(Downloads.used(this))} " +
+                        "em ${Downloads.count(this)} episódio(s).")
+                    .setPositiveButton("Apagar todos") { _, _ ->
+                        Downloads.clearAll(this)
+                        toast("Downloads apagados.")
+                    }
+                    .setNegativeButton("Fechar", null).show()
+                4 -> {
                     HomeWorker.runNow(this)
                     toast("Publicando… confira o resultado em Diagnóstico daqui a alguns segundos.")
                 }
-                3 -> showDiagnostics()
-                4 -> checkUpdate()
+                5 -> showDiagnostics()
+                6 -> checkUpdate()
             }
         }.show()
     }
