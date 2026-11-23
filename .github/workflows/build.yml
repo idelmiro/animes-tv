@@ -31,6 +31,16 @@ jobs:
       - name: Renomear APK
         run: cp app/build/outputs/apk/release/app-release.apk animes-tv.apk
 
+      - name: Conferir bibliotecas nativas
+        run: |
+          unzip -l animes-tv.apk | grep '\.so$'
+          for lib in libtorrent4j.so libmpv.so libplayer.so; do
+            for abi in armeabi-v7a arm64-v8a; do
+              unzip -l animes-tv.apk | grep -q "lib/$abi/$lib" || { echo "Faltando lib/$abi/$lib"; exit 1; }
+            done
+          done
+          ls -la animes-tv.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: animes-tv
