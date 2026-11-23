@@ -98,6 +98,16 @@ class MainActivity : Activity() {
 
         updateFavButton()
         load()
+        PlayerLog.crashed(this)?.let { log ->
+            // Fechou depois de mandar abrir o vídeo: provável problema de decodificação na TV.
+            // Na próxima vez, usa um modo de vídeo mais compatível.
+            var note = ""
+            if (log.contains("mpv: abrir") && prefs.videoMode < 2) {
+                prefs.videoMode = prefs.videoMode + 1
+                note = "\n\nNa próxima vez vou usar um modo de vídeo mais compatível (modo ${prefs.videoMode})."
+            }
+            showPlayerLog(log, crashed = true, note = note)
+        }
         HomeWorker.schedule(this)
         HomeWorker.runNow(this)
     }
@@ -598,6 +608,8 @@ class MainActivity : Activity() {
                 append(ManifestReader.report(this@MainActivity, p))
                 appendLine()
             }
+            appendLine("Modo de vídeo do player: ${prefs.videoMode} (0 = hardware, 1 = hardware com cópia, 2 = software)")
+            appendLine("Downloads: ${Downloads.count(this@MainActivity)} episódio(s), ${Downloads.human(Downloads.used(this@MainActivity))}")
             appendLine("Amnis (torrent): ${if (Amnis.isInstalled(this@MainActivity)) "instalado" else "não instalado"}")
             appendLine("Forma de abrir anime: ${prefs.openMethod ?: CrunchyrollLauncher.DEFAULT_SERIES_METHOD + " (padrão)"}")
             appendLine("Forma de abrir episódio: ${prefs.episodeMethod ?: CrunchyrollLauncher.DEFAULT_EPISODE_METHOD + " (padrão)"}")
@@ -606,7 +618,20 @@ class MainActivity : Activity() {
             appendLine("Tela inicial: ${prefs.homeStatus}")
             if (loadError != null) appendLine("Último erro de carregamento: $loadError")
         }
-        dialog().setTitle("Diagnóstico").setMessage(text).setPositiveButton("OK", null).show()
+        val b = dialog().setTitle("Diagnóstico").setMessage(text).setPositiveButton("OK", null)
+        PlayerLog.last(this)?.let { log -> b.setNeutralButton("Registro do player") { _, _ -> showPlayerLog(log, crashed = false) } }
+        b.show()
+    }
+
+    /** Mostra o registro do player (as últimas linhas, que dizem onde parou). */
+    private fun showPlayerLog(text: String, crashed: Boolean, note: String = "") {
+        val tail = text.lines().filter { it.isNotBlank() }.takeLast(45).joinToString("\n")
+        val intro = if (crashed) "O player fechou inesperadamente na última vez. Últimas etapas registradas:\n\n" else ""
+        dialog().setTitle(if (crashed) "O player fechou" else "Registro do player")
+            .setMessage(intro + tail + note)
+            .setPositiveButton("OK") { _, _ -> if (crashed) PlayerLog.dismiss(this) }
+            .setOnCancelListener { if (crashed) PlayerLog.dismiss(this) }
+            .show()
     }
 
     private fun checkUpdate() {

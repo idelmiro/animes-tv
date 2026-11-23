@@ -63,6 +63,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("useAmnis", false)
         set(v) = sp.edit().putBoolean("useAmnis", v).apply()
 
+    /**
+     * Modo de vídeo do player: 0 = decodificação de vídeo direta pelo hardware;
+     * 1 = hardware com cópia (mais compatível); 2 = só software (mais pesado, mas sem
+     * depender do decodificador da TV). Sobe sozinho se o player fechar ao abrir um vídeo.
+     */
+    var videoMode: Int
+        get() = sp.getInt("videoMode", 0)
+        set(v) = sp.edit().putInt("videoMode", v.coerceIn(0, 2)).apply()
+
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)
         set(v) = sp.edit().putInt("offset", v).apply()
