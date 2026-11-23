@@ -25,7 +25,13 @@ data class Anime(
 data class Stream(val site: String, val url: String)
 
 /** Um episódio na grade. [airingAt] é o horário de exibição no Japão (segundos desde 1970). */
-data class Airing(val anime: Anime, val episode: Int, val airingAt: Long) {
+data class Airing(
+    val anime: Anime,
+    val episode: Int,
+    val airingAt: Long,
+    /** true = anime fora do Crunchyroll, mostrado uma semana depois da exibição real. */
+    val delayed: Boolean = false
+) {
     /** Horário estimado em que o episódio legendado sai no Crunchyroll. */
     fun releaseMillis(offsetMinutes: Int): Long = (airingAt + offsetMinutes * 60L) * 1000L
 }
@@ -110,6 +116,22 @@ object AniList {
           }
         }
     """.trimIndent().replace('#', '$')
+
+    private const val WEEK = 7 * 86400L
+
+    /**
+     * Programação para a grade, entre [start] e [end]: animes do Crunchyroll em tempo real;
+     * os de outros serviços com uma semana de atraso (cada episódio aparece 7 dias depois
+     * da exibição no Japão), para dar tempo de saírem as legendas dos fansubs.
+     */
+    fun fetchSchedule(start: Long, end: Long): List<Airing> =
+        fetch(start - WEEK, end).mapNotNull { a ->
+            when {
+                a.anime.crunchyrollUrl != null -> a.takeIf { it.airingAt > start }
+                a.airingAt < end - WEEK -> a.copy(airingAt = a.airingAt + WEEK, delayed = true)
+                else -> null
+            }
+        }
 
     /** Busca todos os episódios exibidos entre [start] e [end] (segundos, horário do Japão). */
     fun fetch(start: Long, end: Long): List<Airing> {
