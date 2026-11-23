@@ -58,6 +58,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("onlyCr2", false)
         set(v) = sp.edit().putBoolean("onlyCr2", v).apply()
 
+    /** true = abrir os episódios do Nyaa no Amnis em vez do player do próprio app. */
+    var useAmnis: Boolean
+        get() = sp.getBoolean("useAmnis", false)
+        set(v) = sp.edit().putBoolean("useAmnis", v).apply()
+
     var offsetMinutes: Int
         get() = sp.getInt("offset", 60)
         set(v) = sp.edit().putInt("offset", v).apply()
