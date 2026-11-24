@@ -146,6 +146,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // Episódios que terminaram de baixar na memória interna vão para o pendrive/HD.
+        Downloads.finishMoves(applicationContext)
         val saved = prefs.pendingTest ?: return
         prefs.pendingTest = null
         try {
@@ -299,7 +301,19 @@ class MainActivity : Activity() {
                 val off = prefs.offsetMinutes * 60L
                 val start = week.atStartOfDay(zone).toEpochSecond() - off
                 val end = week.plusDays(7).atStartOfDay(zone).toEpochSecond() - off
-                val list = withContext(Dispatchers.IO) { AniList.fetchSchedule(start, end) }
+                // Logo depois de ligar a TV a internet pode ainda não estar pronta: tenta de novo sozinho.
+                var attempt = 0
+                val list = withContext(Dispatchers.IO) {
+                    while (true) {
+                        try { return@withContext AniList.fetchSchedule(start, end) } catch (e: java.io.IOException) {
+                            if (++attempt > 8) throw e
+                            withContext(Dispatchers.Main) { setStatus("Esperando a internet da TV ficar pronta… (tentativa ${attempt + 1})") }
+                            kotlinx.coroutines.delay(minOf(15_000L, 3_000L * attempt))
+                        }
+                    }
+                    @Suppress("UNREACHABLE_CODE")
+                    emptyList()
+                }
                 cache[week] = list
                 if (week == monday) {
                     updateDays()
