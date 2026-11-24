@@ -96,26 +96,56 @@ object Downloads {
 
     private fun lastUse(dir: File) = marker(dir).takeIf { it.exists() }?.lastModified() ?: dir.lastModified()
 
-    /** Guarda de qual anime/episódio é o download, para achar depois sem buscar no Nyaa. */
-    fun writeInfo(dir: File, animeId: Int, title: String, episode: Int, release: String, size: Long) {
+    private fun readInfo(dir: File): org.json.JSONObject? =
+        try { org.json.JSONObject(info(dir).readText()) } catch (_: Throwable) { null }
+
+    /** Atualiza o .info do download (mantém os campos que já existiam). */
+    fun updateInfo(dir: File, vararg fields: Pair<String, Any>) {
         try {
-            info(dir).writeText(org.json.JSONObject()
-                .put("animeId", animeId).put("title", title).put("episode", episode)
-                .put("release", release).put("size", size).toString())
+            val o = readInfo(dir) ?: org.json.JSONObject()
+            for ((k, v) in fields) o.put(k, v)
+            info(dir).writeText(o.toString())
         } catch (_: Throwable) {
         }
     }
 
-    data class Saved(val dir: File, val video: File, val animeId: Int, val episode: Int, val release: String, val size: Long)
+    /** Guarda de qual anime/episódio é o download, para achar depois sem buscar no Nyaa. */
+    fun writeInfo(dir: File, animeId: Int, title: String, episode: Int, release: String, size: Long, magnet: String) =
+        updateInfo(dir, "animeId" to animeId, "title" to title, "episode" to episode,
+            "release" to release, "size" to size, "magnet" to magnet)
 
-    /** Episódios completos já baixados (com a informação de anime/episódio). */
+    /** Ponto em que parou de assistir (segundos; 0 = do começo). */
+    fun savePosition(dir: File, seconds: Long) = updateInfo(dir, "pos" to seconds)
+
+    data class Saved(
+        val dir: File,
+        /** Vídeo completo; null se o download não terminou. */
+        val video: File?,
+        val animeId: Int,
+        val episode: Int,
+        val release: String,
+        val size: Long,
+        val magnet: String?,
+        /** Onde parou de assistir, em segundos. */
+        val pos: Long,
+        /** Porcentagem baixada (só faz sentido se incompleto). */
+        val percent: Int
+    ) {
+        val complete get() = video != null
+    }
+
+    /** Episódios guardados, completos ou em andamento (com a informação de anime/episódio). */
     fun saved(ctx: Context): List<Saved> {
         if (!available(ctx)) return emptyList()
         return (root(ctx).listFiles() ?: emptyArray()).mapNotNull { d ->
-            val v = completed(d) ?: return@mapNotNull null
+            val o = readInfo(d) ?: return@mapNotNull null
+            val v = completed(d)
+            val magnet = o.optString("magnet").takeIf { it.isNotBlank() }
+            if (v == null && magnet == null) return@mapNotNull null
             try {
-                val o = org.json.JSONObject(info(d).readText())
-                Saved(d, v, o.getInt("animeId"), o.getInt("episode"), o.optString("release", v.name), v.length())
+                Saved(d, v, o.getInt("animeId"), o.getInt("episode"), o.optString("release", v?.name ?: ""),
+                    o.optLong("size", v?.length() ?: 0L), magnet, o.optLong("pos", 0L),
+                    if (v != null) 100 else o.optInt("percent", 0))
             } catch (_: Throwable) { null }
         }
     }
@@ -140,7 +170,8 @@ object Downloads {
         var removed = 0
         val limit = cap(ctx)
         val dirs = (root(ctx).listFiles() ?: emptyArray()).filter { it.isDirectory && it != keep }
-        for (d in dirs.filter { completed(it) == null }) {
+        // Incompletos sem como continuar (sem link guardado) não servem para nada.
+        for (d in dirs.filter { completed(it) == null && readInfo(it)?.optString("magnet").isNullOrBlank() }) {
             d.deleteRecursively(); removed++
         }
         val done = dirs.filter { it.exists() }.sortedBy { lastUse(it) }
@@ -200,6 +231,10 @@ class TorrentStream(
     @Volatile private var waitingPiece = -1
     /** Último byte do arquivo entregue ao player (onde a reprodução está lendo). */
     @Volatile private var readPos = 0L
+    @Volatile private var lastDone = 0L
+
+    /** Pasta do episódio (para guardar o ponto em que parou). */
+    val folder: File? get() = dir
     private var windowStart = -1
     @Volatile private var handle: TorrentHandle? = null
     private var session: SessionManager? = null
@@ -300,12 +335,13 @@ class TorrentStream(
                 others.forEach { it.deleteRecursively() }
                 removed = savedCount
             } else {
-                removed = Downloads.makeRoom(ctx, fileSize, d)
+                // Ao continuar um download, o que já está na pasta não conta de novo.
+                removed = Downloads.makeRoom(ctx, maxOf(0L, fileSize - Downloads.size(d)), d)
             }
             d.mkdirs()
-            Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize)
+            Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize, magnet)
             val free = StatFs(d.absolutePath).availableBytes
-            if (free < fileSize + 50L * 1024 * 1024) {
+            if (free < fileSize - Downloads.size(d) + 50L * 1024 * 1024) {
                 fail("A TV não tem espaço livre suficiente (${Downloads.human(free)} livres, o episódio tem ${Downloads.human(fileSize)}).")
                 return
             }
@@ -354,9 +390,15 @@ class TorrentStream(
                 val h = handle ?: refind() ?: continue
                 val st = try { h.status() } catch (e: RuntimeException) { handle = null; continue }
                 val done = try { h.fileProgress().getOrElse(idx) { 0L } } catch (e: RuntimeException) { 0L }
+                lastDone = done
                 val ahead = try { keepWindow(h) } catch (e: RuntimeException) { 0L }
-                val phase = if (st.numPeers() == 0) Phase.CONNECTING else Phase.DOWNLOADING
-                val msg = if (phase == Phase.CONNECTING) "Conectando às pessoas que têm o episódio…" else "Baixando o episódio…"
+                val checking = st.state().name.contains("CHECKING")
+                val phase = if (st.numPeers() == 0 || checking) Phase.CONNECTING else Phase.DOWNLOADING
+                val msg = when {
+                    checking -> "Conferindo o que já tinha sido baixado…"
+                    phase == Phase.CONNECTING -> "Conectando às pessoas que têm o episódio…"
+                    else -> "Baixando o episódio…"
+                }
                 status(Status(phase, msg, st.numPeers(), st.numSeeds(), st.downloadRate(), st.uploadRate(), done, fileSize, waitingPiece >= 0, ahead))
             }
         } catch (e: InterruptedException) {
@@ -417,15 +459,17 @@ class TorrentStream(
         Thread { stopSession() }.start()
     }
 
-    /** Fecha tudo. Se o download não terminou, apaga o que foi baixado. */
+    /**
+     * Fecha tudo e para de compartilhar. Se o download não terminou, o que já foi baixado
+     * fica guardado para continuar depois (o próximo download conferirá e aproveitará).
+     */
     fun stop() {
         if (closed) return
         closed = true
         try { server?.close() } catch (_: Throwable) {}
-        Thread {
-            stopSession()
-            if (!complete) dir?.deleteRecursively()
-        }.start()
+        val d = dir
+        if (!complete && d != null && fileSize > 0) Downloads.updateInfo(d, "percent" to (lastDone * 100 / fileSize).toInt())
+        Thread { stopSession() }.start()
     }
 
     @Synchronized
