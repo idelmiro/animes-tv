@@ -195,6 +195,10 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
                 sb.append("\nConectado a ${s.peers} pessoa(s) (${s.seeds} com o arquivo completo)")
                 sb.append("\nVelocidade: ${speed(s.downRate)}")
                 if (s.upRate > 0) sb.append(" • enviando ${speed(s.upRate)}")
+                if (duration > 0 && s.total > 0) {
+                    val secs = s.ahead * duration / s.total
+                    sb.append("\nJá baixado à frente: ~${time(secs)} de vídeo")
+                }
             }
         }
         if (mpvReady && started && duration > 0) sb.append("\n\n${time(position)} / ${time(duration)}")
@@ -338,7 +342,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         MPVLib.setOptionString("cache", "yes")
         MPVLib.setOptionString("cache-pause-initial", "yes")
-        MPVLib.setOptionString("cache-pause-wait", "3")
+        MPVLib.setOptionString("cache-pause-wait", "10")
         MPVLib.setOptionString("demuxer-max-bytes", "32MiB")
         MPVLib.setOptionString("demuxer-max-back-bytes", "8MiB")
         MPVLib.setOptionString("network-timeout", "0")
@@ -419,8 +423,18 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
 
     // Eventos do mpv chegam em outra thread.
     override fun eventProperty(property: String) {}
+    /**
+     * Legenda simples: placas e karaokê (abertura/encerramento) vêm como muitas linhas
+     * curtas, às vezes uma letra por linha. Mostra só as falas (linhas com texto de verdade).
+     */
+    private fun cleanSub(text: String): String {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val real = lines.filter { it.length >= 4 || it.any { c -> c == '?' || c == '!' || c == '.' } && it.length >= 2 }
+        return if (real.size > 3) real.takeLast(2).joinToString("\n") else real.joinToString("\n")
+    }
+
     override fun eventProperty(property: String, value: String) {
-        if (property == "sub-text") ui.post { subView.text = value }
+        if (property == "sub-text") ui.post { subView.text = cleanSub(value) }
     }
     override fun eventProperty(property: String, value: Double) {}
 
