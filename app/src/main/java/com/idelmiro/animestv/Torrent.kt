@@ -79,6 +79,111 @@ object Downloads {
 
     fun dirFor(ctx: Context, hash: String, fileIndex: Int) = File(root(ctx), "$hash-$fileIndex")
 
+    // ---------- memória interna temporária (quando os downloads vão para pendrive/HD) ----------
+    //
+    // A USB da TV não dá conta de gravar o download e ler o vídeo ao mesmo tempo. Então o
+    // episódio baixa e toca na memória interna e, quando o download termina e o player fecha,
+    // é copiado para o pendrive/HD em segundo plano.
+
+    /** Downloads em andamento na memória interna (quando o local escolhido é pendrive/HD). */
+    fun stagingRoot(ctx: Context): File =
+        File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "downloads-temp").apply { mkdirs() }
+
+    fun stagingFor(ctx: Context, hash: String, fileIndex: Int) = File(stagingRoot(ctx), "$hash-$fileIndex")
+
+    /** O local escolhido é um pendrive/HD (e não a memória interna)? */
+    fun usesExternal(ctx: Context) = Prefs(ctx).downloadPath != null
+
+    fun isStaging(ctx: Context, dir: File) = dir.parentFile?.absolutePath == stagingRoot(ctx).absolutePath
+
+    /** Pastas que o player está usando agora (não podem ser movidas nem apagadas). */
+    val inUse: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private fun stagedDirs(ctx: Context) = (stagingRoot(ctx).listFiles() ?: emptyArray()).filter { it.isDirectory }
+
+    /**
+     * Deixa na memória interna no máximo um outro download pela metade (o mais recente), para
+     * não lotar a TV com episódios abandonados.
+     */
+    fun trimStaging(ctx: Context, keep: File) {
+        stagedDirs(ctx).filter { it != keep && completed(it) == null && it.absolutePath !in inUse }
+            .sortedByDescending { it.lastModified() }.drop(1).forEach { it.deleteRecursively() }
+    }
+
+    /** Copia uma pasta inteira (blocos grandes: bem mais rápido na USB). */
+    fun copyTree(from: File, to: File, skip: Set<String> = emptySet(), progress: ((Long) -> Unit)? = null): Boolean {
+        val buf = ByteArray(1024 * 1024)
+        var copied = 0L
+        fun walk(src: File, dst: File) {
+            if (src.isDirectory) {
+                dst.mkdirs()
+                for (c in src.listFiles() ?: emptyArray()) if (c.name !in skip) walk(c, File(dst, c.name))
+            } else {
+                src.inputStream().use { inp ->
+                    dst.outputStream().use { out ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n <= 0) break
+                            out.write(buf, 0, n)
+                            copied += n
+                            progress?.invoke(copied)
+                        }
+                    }
+                }
+            }
+        }
+        return try { walk(from, to); true } catch (e: Throwable) {
+            PlayerLog.add("downloads: erro ao copiar ${from.name}: $e"); false
+        }
+    }
+
+    /**
+     * Leva um episódio completo da memória interna para o pendrive/HD. Devolve true se moveu
+     * (ou se já estava lá).
+     */
+    @Synchronized
+    fun moveToFinal(ctx: Context, stage: File): Boolean {
+        val video = completed(stage) ?: return false
+        if (stage.absolutePath in inUse || !available(ctx) || !usesExternal(ctx)) return false
+        val final = File(root(ctx), stage.name)
+        if (completed(final) != null) {
+            stage.deleteRecursively()
+            return true
+        }
+        final.deleteRecursively()
+        val size = size(stage)
+        makeRoom(ctx, size, final)
+        if (StatFs(root(ctx).absolutePath).availableBytes < size + 50L * 1024 * 1024) return false
+        // O vídeo primeiro; .info e .pronto por último (sem eles a pasta não conta como episódio).
+        if (!copyTree(stage, final, setOf(".pronto", ".info", ".resume", ".info.tmp"))) {
+            final.deleteRecursively()
+            return false
+        }
+        try { info(stage).takeIf { it.exists() }?.copyTo(info(final), true) } catch (_: Throwable) {}
+        markDone(final, File(final.absolutePath + video.absolutePath.removePrefix(stage.absolutePath)))
+        if (stage.absolutePath !in inUse) stage.deleteRecursively()
+        return true
+    }
+
+    private val moving = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Em segundo plano: move para o pendrive/HD os episódios completos que estão na memória interna. */
+    fun finishMoves(ctx: Context) {
+        if (!usesExternal(ctx) || !moving.compareAndSet(false, true)) return
+        Thread({
+            try {
+                for (d in stagedDirs(ctx)) {
+                    if (completed(d) != null) moveToFinal(ctx, d)
+                    else if (readInfo(d) == null && d.absolutePath !in inUse &&
+                        System.currentTimeMillis() - d.lastModified() > 6 * 3600_000L) d.deleteRecursively()
+                }
+            } catch (_: Throwable) {
+            } finally {
+                moving.set(false)
+            }
+        }, "downloads-move").start()
+    }
+
     /** Informações do torrent (para continuar sem esperar alguém mandá-las de novo). */
     fun metaFile(dir: File) = File(dir, ".torrent")
     /** Mapa do que já foi baixado (para continuar sem reler o arquivo inteiro). */
@@ -86,8 +191,8 @@ object Downloads {
 
     /** Pasta de um download anterior do mesmo torrent que guardou as informações dele. */
     fun findMeta(ctx: Context, hash: String): File? {
-        if (!available(ctx)) return null
-        return (root(ctx).listFiles() ?: emptyArray()).firstOrNull {
+        val dirs = stagedDirs(ctx) + if (available(ctx)) (root(ctx).listFiles() ?: emptyArray()).toList() else emptyList()
+        return dirs.firstOrNull {
             it.isDirectory && it.name.startsWith("$hash-", ignoreCase = true) && metaFile(it).length() > 0
         }?.let { metaFile(it) }
     }
@@ -166,8 +271,11 @@ object Downloads {
 
     /** Episódios guardados, completos ou em andamento (com a informação de anime/episódio). */
     fun saved(ctx: Context): List<Saved> {
-        if (!available(ctx)) return emptyList()
-        return (root(ctx).listFiles() ?: emptyArray()).mapNotNull { d ->
+        val main = if (available(ctx)) (root(ctx).listFiles() ?: emptyArray()).toList() else emptyList()
+        val staged = if (usesExternal(ctx)) stagedDirs(ctx) else emptyList()
+        // Se o mesmo episódio está nos dois lugares, vale o da memória interna (é o mais novo).
+        val names = staged.map { it.name }.toSet()
+        return (staged + main.filter { it.name !in names }).mapNotNull { d ->
             val o = readInfo(d) ?: return@mapNotNull null
             val v = completed(d)
             val magnet = o.optString("magnet").takeIf { it.isNotBlank() }
@@ -186,10 +294,12 @@ object Downloads {
 
     fun used(ctx: Context): Long = if (available(ctx)) size(root(ctx)) else 0L
 
-    fun count(ctx: Context): Int = if (!available(ctx)) 0 else root(ctx).listFiles()?.count { it.isDirectory && completed(it) != null } ?: 0
+    fun count(ctx: Context): Int = (if (!available(ctx)) 0 else root(ctx).listFiles()?.count { it.isDirectory && completed(it) != null } ?: 0) +
+        (if (usesExternal(ctx)) stagedDirs(ctx).count { completed(it) != null } else 0)
 
     fun clearAll(ctx: Context) {
         root(ctx).listFiles()?.forEach { it.deleteRecursively() }
+        stagedDirs(ctx).filter { it.absolutePath !in inUse }.forEach { it.deleteRecursively() }
     }
 
     /**
@@ -352,14 +462,17 @@ class TorrentStream(
                 fail("O pendrive escolhido para os downloads não foi encontrado. Conecte-o de novo ou mude o local em Ajustes → Downloads.")
                 return
             }
-            val d = Downloads.dirFor(ctx, hash, idx)
-            dir = d
+            val final = Downloads.dirFor(ctx, hash, idx)
+            val stage = Downloads.stagingFor(ctx, hash, idx)
+            val d = final
 
             // Já baixado antes: toca direto do arquivo, sem rede.
-            Downloads.completed(d)?.let { f ->
+            for (x in listOf(stage, final)) Downloads.completed(x)?.let { f ->
+                dir = x
+                Downloads.inUse.add(x.absolutePath)
                 complete = true
                 video = f
-                Downloads.touch(d)
+                Downloads.touch(x)
                 status(Status(Phase.COMPLETE, "Episódio já estava baixado. Tocando sem usar a internet.", done = f.length(), total = f.length()))
                 stopSession()
                 onReady(f.absolutePath)
@@ -391,6 +504,53 @@ class TorrentStream(
                 // Ao continuar um download, o que já está na pasta não conta de novo.
                 removed = Downloads.makeRoom(ctx, maxOf(0L, fileSize - Downloads.size(d)), d)
             }
+            if (removed > 0) status(Status(Phase.SPACE, "Apaguei $removed episódio(s) antigo(s) para liberar espaço.", total = fileSize))
+            workDir(final, stage).let { dd -> return runIn(s, ti, idx, hash, dd, data) }
+        } catch (e: InterruptedException) {
+        } catch (e: Throwable) {
+            PlayerLog.add("torrent: exceção $e")
+            if (!closed) fail("Erro no download: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Onde baixar: com pendrive/HD escolhido, baixa na memória interna (se couber) e move
+     * depois. Um download pela metade que já estava no pendrive/HD é trazido para cá antes.
+     */
+    private fun workDir(final: File, stage: File): File {
+        if (!Downloads.usesExternal(ctx)) return final
+        if (Downloads.size(stage) > 0) return stage
+        Downloads.trimStaging(ctx, stage)
+        val free = try { StatFs(Downloads.stagingRoot(ctx).absolutePath).availableBytes } catch (_: Throwable) { 0L }
+        if (free < fileSize + 300L * 1024 * 1024) {
+            PlayerLog.add("torrent: memória interna sem espaço (${Downloads.human(free)} livres); baixando direto no pendrive/HD")
+            return final
+        }
+        val partial = Downloads.size(final)
+        if (partial > 0 && Downloads.completed(final) == null) {
+            val msg = "Trazendo para a memória interna o que já foi baixado"
+            var last = -1
+            val ok = Downloads.copyTree(final, stage) { n ->
+                val pct = (n * 100 / partial).toInt()
+                if (pct != last) { last = pct; status(Status(Phase.SPACE, "$msg… $pct%", total = fileSize)) }
+                if (closed) throw InterruptedException()
+            }
+            if (!ok) {
+                stage.deleteRecursively()
+                return final
+            }
+            final.deleteRecursively()
+        }
+        PlayerLog.add("torrent: baixando na memória interna (vai para o pendrive/HD quando terminar)")
+        return stage
+    }
+
+    private fun runIn(s: SessionManager, ti: TorrentInfo, idx: Int, hash: String, d: File, data: ByteArray) {
+        try {
+            if (closed) return
+            dir = d
+            Downloads.inUse.add(d.absolutePath)
+            val fs = ti.files()
             d.mkdirs()
             Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize, magnet)
             val meta = Downloads.metaFile(d)
@@ -401,8 +561,6 @@ class TorrentStream(
                 fail("A TV não tem espaço livre suficiente (${Downloads.human(free)} livres, o episódio tem ${Downloads.human(fileSize)}).")
                 return
             }
-            if (removed > 0) status(Status(Phase.SPACE, "Apaguei $removed episódio(s) antigo(s) para liberar espaço.", total = fileSize))
-
             video = File(fs.filePath(idx, d.absolutePath))
             s.addListener(object : AlertListener {
                 override fun types(): IntArray? = null
@@ -567,6 +725,11 @@ class TorrentStream(
         stopping.incrementAndGet()
         Thread {
             try { stopSession() } finally { stopping.decrementAndGet() }
+            if (d != null) {
+                Downloads.inUse.remove(d.absolutePath)
+                // Terminou na memória interna: leva para o pendrive/HD.
+                if (complete && Downloads.isStaging(ctx, d)) Downloads.moveToFinal(ctx, d)
+            }
         }.start()
     }
 

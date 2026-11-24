@@ -76,7 +76,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             // Episódio já baixado: toca direto do arquivo, sem Nyaa e sem torrent.
             val f = File(local)
             localDir = intent.getStringExtra(EXTRA_DIR)?.let { File(it) } ?: f.parentFile
-            localDir?.let { Downloads.touch(it) }
+            localDir?.let { Downloads.touch(it); Downloads.inUse.add(it.absolutePath) }
             PlayerLog.add("player: tocando arquivo salvo ${f.absolutePath}")
             onTorrent(TorrentStream.Status(TorrentStream.Phase.COMPLETE, "Tocando o episódio salvo (sem usar a internet).",
                 done = f.length(), total = f.length()))
@@ -644,6 +644,10 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         ui.removeCallbacksAndMessages(null)
         savePosition()
         torrent?.stop()
+        localDir?.let {
+            Downloads.inUse.remove(it.absolutePath)
+            if (Downloads.isStaging(applicationContext, it)) Downloads.finishMoves(applicationContext)
+        }
         if (mpvReady) {
             MPVLib.removeLogObserver(this)
             MPVLib.removeObserver(this)
