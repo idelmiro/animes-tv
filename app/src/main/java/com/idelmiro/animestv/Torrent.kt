@@ -190,12 +190,17 @@ class TorrentStream(
         val done: Long = 0,
         val total: Long = 0,
         /** O player está esperando um pedaço do arquivo que ainda não chegou. */
-        val waiting: Boolean = false
+        val waiting: Boolean = false,
+        /** Bytes já baixados sem buracos a partir do ponto que o player está lendo. */
+        val ahead: Long = 0
     )
 
     @Volatile private var closed = false
     @Volatile private var complete = false
     @Volatile private var waitingPiece = -1
+    /** Último byte do arquivo entregue ao player (onde a reprodução está lendo). */
+    @Volatile private var readPos = 0L
+    private var windowStart = -1
     @Volatile private var handle: TorrentHandle? = null
     private var session: SessionManager? = null
     private var server: ServerSocket? = null
@@ -205,6 +210,7 @@ class TorrentStream(
     private var fileSize = 0L
     private var pieceLength = 1
     private var lastPiece = 0
+    private var firstPiece = 0
     private var infoHash: org.libtorrent4j.Sha1Hash? = null
     private var deadlineFrom = -1
 
@@ -251,6 +257,7 @@ class TorrentStream(
             fileSize = fs.fileSize(idx)
             pieceLength = ti.pieceLength()
             lastPiece = ((fileOffset + fileSize - 1) / pieceLength).toInt()
+            firstPiece = (fileOffset / pieceLength).toInt()
             val hash = ti.infoHash().toHex()
             infoHash = ti.infoHash()
             if (!Downloads.available(ctx)) {
@@ -320,6 +327,7 @@ class TorrentStream(
                         if (type == AlertType.ADD_TORRENT) {
                             handle = own
                             own.unsetFlags(TorrentFlags.AUTO_MANAGED)
+                            own.setFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD)
                             own.resume()
                         } else finished(own)
                     } catch (e: Throwable) {
@@ -346,15 +354,42 @@ class TorrentStream(
                 val h = handle ?: refind() ?: continue
                 val st = try { h.status() } catch (e: RuntimeException) { handle = null; continue }
                 val done = try { h.fileProgress().getOrElse(idx) { 0L } } catch (e: RuntimeException) { 0L }
+                val ahead = try { keepWindow(h) } catch (e: RuntimeException) { 0L }
                 val phase = if (st.numPeers() == 0) Phase.CONNECTING else Phase.DOWNLOADING
                 val msg = if (phase == Phase.CONNECTING) "Conectando às pessoas que têm o episódio…" else "Baixando o episódio…"
-                status(Status(phase, msg, st.numPeers(), st.numSeeds(), st.downloadRate(), st.uploadRate(), done, fileSize, waitingPiece >= 0))
+                status(Status(phase, msg, st.numPeers(), st.numSeeds(), st.downloadRate(), st.uploadRate(), done, fileSize, waitingPiece >= 0, ahead))
             }
         } catch (e: InterruptedException) {
         } catch (e: Throwable) {
             PlayerLog.add("torrent: exceção $e")
             if (!closed) fail("Erro no download: ${e.message ?: e.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * Mantém o download concentrado logo à frente do ponto de reprodução: os próximos ~48 MB
+     * ficam com prioridade máxima e prazo curto; o resto do episódio baixa depois, com
+     * prioridade baixa. Devolve quantos bytes à frente já estão baixados sem buracos.
+     */
+    private fun keepWindow(h: TorrentHandle): Long {
+        val cur = ((fileOffset + readPos) / pieceLength).toInt().coerceIn(firstPiece, lastPiece)
+        val size = (WINDOW_BYTES / pieceLength).toInt().coerceIn(8, 400)
+        val end = minOf(lastPiece, cur + size)
+        if (cur != windowStart) {
+            // Ponto de leitura mudou (andou ou pulou): refaz prioridades e prazos.
+            windowStart = cur
+            val total = h.torrentFile()?.numPieces() ?: (lastPiece + 1)
+            val prio = Array(total) { Priority.IGNORE }
+            for (p in firstPiece..lastPiece) prio[p] = if (p in cur..end) Priority.TOP_PRIORITY else Priority.LOW
+            h.prioritizePieces(prio)
+            h.clearPieceDeadlines()
+            var k = 0
+            for (p in cur..end) if (!h.havePiece(p)) h.setPieceDeadline(p, 150 * k++)
+        }
+        var p = cur
+        while (p <= lastPiece && h.havePiece(p)) p++
+        val aheadEnd = minOf(fileSize, p.toLong() * pieceLength - fileOffset)
+        return maxOf(0L, aheadEnd - readPos)
     }
 
     /** Arquivo do episódio dentro do torrent (pacotes trazem vários). */
@@ -470,6 +505,7 @@ class TorrentStream(
                     if (n <= 0) { Thread.sleep(50); continue }
                     out.write(buf, 0, n)
                     pos += n
+                    readPos = pos
                 }
             }
             out.flush()
@@ -520,5 +556,6 @@ class TorrentStream(
     companion object {
         private val VIDEO_EXT = setOf("mkv", "mp4", "avi", "webm", "m4v", "ts")
         private const val READAHEAD = 6
+        private const val WINDOW_BYTES = 48L * 1024 * 1024
     }
 }
