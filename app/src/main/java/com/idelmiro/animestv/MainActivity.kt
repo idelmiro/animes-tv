@@ -434,8 +434,13 @@ class MainActivity : Activity() {
     private fun onOtherServiceClick(a: Airing) {
         val fav = prefs.isFav(a.anime.id)
         val actions = ArrayList<Pair<String, () -> Unit>>()
-        val isSaved = Downloads.savedFor(this, a.anime.id, a.episode).isNotEmpty()
-        actions += (if (isSaved) "▶ Assistir episódio ${a.episode} (já baixado)" else "▶ Buscar episódio ${a.episode} legendado (PT-BR)") to { searchNyaa(a, a.episode) }
+        val sv = Downloads.savedFor(this, a.anime.id, a.episode)
+        val label = when {
+            sv.any { it.complete } -> "▶ Assistir episódio ${a.episode} (já baixado)"
+            sv.isNotEmpty() -> "▶ Continuar episódio ${a.episode} (download em andamento)"
+            else -> "▶ Buscar episódio ${a.episode} legendado (PT-BR)"
+        }
+        actions += label to { searchNyaa(a, a.episode) }
         if (a.episode > 1) actions += "Episódios anteriores…" to { chooseEarlierEpisode(a) }
         for (st in a.anime.streams) actions += "Abrir no ${st.site}" to { openUrl(st.url) }
         actions += (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
@@ -449,8 +454,16 @@ class MainActivity : Activity() {
     /** Segunda janela: lista os episódios anteriores (do mais recente para o primeiro). */
     private fun chooseEarlierEpisode(a: Airing) {
         val eps = (a.episode - 1 downTo maxOf(1, a.episode - 60)).toList()
-        val have = Downloads.saved(this).filter { it.animeId == a.anime.id }.map { it.episode }.toSet()
-        val labels = eps.map { if (it in have) "Episódio $it • baixado" else "Episódio $it" }.toTypedArray()
+        val mine = Downloads.saved(this).filter { it.animeId == a.anime.id }
+        val done = mine.filter { it.complete }.map { it.episode }.toSet()
+        val partial = mine.filter { !it.complete }.map { it.episode }.toSet()
+        val labels = eps.map {
+            when (it) {
+                in done -> "Episódio $it • baixado"
+                in partial -> "Episódio $it • em andamento"
+                else -> "Episódio $it"
+            }
+        }.toTypedArray()
         dialog().setTitle("${a.anime.title} — episódios anteriores")
             .setItems(labels) { _, which -> searchNyaa(a, eps[which]) }
             .setNegativeButton("Voltar") { _, _ -> onOtherServiceClick(a) }
@@ -481,7 +494,7 @@ class MainActivity : Activity() {
         return Progress(b.show(), text)
     }
 
-    /** Antes de buscar no Nyaa, vê se o episódio já está baixado e oferece tocar direto. */
+    /** Antes de buscar no Nyaa, vê se o episódio já está baixado (ou em andamento) e oferece continuar. */
     private fun searchNyaa(a: Airing, episode: Int) {
         val saved = Downloads.savedFor(this, a.anime.id, episode)
         if (saved.isEmpty() || prefs.useAmnis) {
@@ -489,24 +502,52 @@ class MainActivity : Activity() {
             return
         }
         val actions = ArrayList<Pair<String, () -> Unit>>()
-        for (sv in saved) actions += "▶ Assistir o baixado (${Downloads.human(sv.size)})\n${sv.release}" to { playSaved(a, episode, sv) }
+        for (sv in saved) {
+            val info = "${Downloads.human(sv.size)} • ${sv.release}"
+            if (sv.complete) {
+                if (sv.pos > 30) {
+                    actions += "▶ Continuar de ${clock(sv.pos)}\n$info" to { playSaved(a, episode, sv, sv.pos) }
+                    actions += "Assistir do começo" to { playSaved(a, episode, sv, 0) }
+                } else actions += "▶ Assistir o baixado\n$info" to { playSaved(a, episode, sv, 0) }
+            } else {
+                val from = if (sv.pos > 30) ", de ${clock(sv.pos)}" else ""
+                actions += "▶ Continuar (${sv.percent}% baixado$from)\n$info" to { resumeDownload(a, episode, sv) }
+            }
+        }
         actions += "Buscar outra versão no Nyaa" to { searchNyaaNow(a, episode) }
-        actions += (if (saved.size > 1) "Apagar os baixados deste episódio" else "Apagar o baixado") to {
+        actions += (if (saved.size > 1) "Apagar os guardados deste episódio" else "Apagar o guardado") to {
             saved.forEach { it.dir.deleteRecursively() }
             toast("Apagado.")
         }
-        dialog().setTitle("${a.anime.title} — Ep. $episode já está baixado")
+        val state = if (saved.any { it.complete }) "já está baixado" else "tem download em andamento"
+        dialog().setTitle("${a.anime.title} — Ep. $episode $state")
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
             .setNegativeButton("Fechar", null)
             .show()
     }
 
-    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved) {
+    private fun clock(s: Long) = if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+        else String.format("%d:%02d", s / 60, s % 60)
+
+    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved, start: Long) {
         startActivity(Intent(this, PlayerActivity::class.java)
-            .putExtra(PlayerActivity.EXTRA_LOCAL_FILE, sv.video.absolutePath)
+            .putExtra(PlayerActivity.EXTRA_LOCAL_FILE, sv.video!!.absolutePath)
+            .putExtra(PlayerActivity.EXTRA_DIR, sv.dir.absolutePath)
             .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
-            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id))
+            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+            .putExtra(PlayerActivity.EXTRA_START, start))
+    }
+
+    /** Download que ficou pela metade: retoma o torrent aproveitando o que já foi baixado. */
+    private fun resumeDownload(a: Airing, episode: Int, sv: Downloads.Saved) {
+        startActivity(Intent(this, PlayerActivity::class.java)
+            .putExtra(PlayerActivity.EXTRA_MAGNET, sv.magnet)
+            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+            .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
+            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+            .putExtra(PlayerActivity.EXTRA_RELEASE, sv.release)
+            .putExtra(PlayerActivity.EXTRA_START, if (sv.pos > 30) sv.pos else 0L))
     }
 
     private fun searchNyaaNow(a: Airing, episode: Int) {

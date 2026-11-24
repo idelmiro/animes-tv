@@ -53,6 +53,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     private var lastDrops = 0
     private var suggested = false
     private var episode = 0
+    private var localDir: File? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,7 +75,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         if (local != null) {
             // Episódio já baixado: toca direto do arquivo, sem Nyaa e sem torrent.
             val f = File(local)
-            f.parentFile?.let { Downloads.touch(it) }
+            localDir = intent.getStringExtra(EXTRA_DIR)?.let { File(it) } ?: f.parentFile
+            localDir?.let { Downloads.touch(it) }
             PlayerLog.add("player: tocando arquivo salvo ${f.absolutePath}")
             onTorrent(TorrentStream.Status(TorrentStream.Phase.COMPLETE, "Tocando o episódio salvo (sem usar a internet).",
                 done = f.length(), total = f.length()))
@@ -615,8 +617,32 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         showOsd()
     }
 
+    /**
+     * Saiu do player (Voltar, Home, troca de entrada HDMI): para tudo na hora, em vez de o
+     * vídeo continuar tocando escondido. O ponto em que parou e o que já foi baixado ficam
+     * guardados para continuar depois.
+     */
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations && !isFinishing) {
+            PlayerLog.add("player: saiu da tela, encerrando")
+            if (mpvReady) try { MPVLib.setPropertyBoolean("pause", true) } catch (_: Throwable) {}
+            finish()
+        }
+    }
+
+    private fun savePosition() {
+        val dir = torrent?.folder ?: localDir ?: return
+        if (!started) return
+        // Perto do fim conta como assistido: na próxima vez começa do início.
+        val pos = if (duration > 0 && duration - position < 90) 0L else maxOf(0L, position - 3)
+        Downloads.savePosition(dir, pos)
+        PlayerLog.add("player: posição guardada ${time(pos)}")
+    }
+
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        savePosition()
         torrent?.stop()
         if (mpvReady) {
             MPVLib.removeLogObserver(this)
@@ -633,6 +659,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         const val EXTRA_TITLE = "title"
         const val EXTRA_EPISODE = "episode"
         const val EXTRA_START = "start"
+        const val EXTRA_DIR = "dir"
         const val EXTRA_LOCAL_FILE = "localFile"
         const val EXTRA_ANIME_ID = "animeId"
         const val EXTRA_RELEASE = "release"
