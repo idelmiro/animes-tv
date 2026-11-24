@@ -2,6 +2,7 @@ package com.idelmiro.animestv
 
 import android.content.Context
 import android.os.StatFs
+import org.libtorrent4j.AddTorrentParams
 import org.libtorrent4j.AlertListener
 import org.libtorrent4j.Priority
 import org.libtorrent4j.SessionManager
@@ -11,6 +12,7 @@ import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
 import org.libtorrent4j.alerts.Alert
 import org.libtorrent4j.alerts.AlertType
+import org.libtorrent4j.alerts.SaveResumeDataAlert
 import org.libtorrent4j.alerts.TorrentAlert
 import java.io.BufferedReader
 import java.io.File
@@ -21,6 +23,11 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Pasta de downloads com limite de espaço, na memória interna ou num pendrive/cartão.
@@ -71,6 +78,29 @@ object Downloads {
     }
 
     fun dirFor(ctx: Context, hash: String, fileIndex: Int) = File(root(ctx), "$hash-$fileIndex")
+
+    /** Informações do torrent (para continuar sem esperar alguém mandá-las de novo). */
+    fun metaFile(dir: File) = File(dir, ".torrent")
+    /** Mapa do que já foi baixado (para continuar sem reler o arquivo inteiro). */
+    fun resumeFile(dir: File) = File(dir, ".resume")
+
+    /** Pasta de um download anterior do mesmo torrent que guardou as informações dele. */
+    fun findMeta(ctx: Context, hash: String): File? {
+        if (!available(ctx)) return null
+        return (root(ctx).listFiles() ?: emptyArray()).firstOrNull {
+            it.isDirectory && it.name.startsWith("$hash-", ignoreCase = true) && metaFile(it).length() > 0
+        }?.let { metaFile(it) }
+    }
+
+    /** Grava sem deixar o arquivo pela metade se o app for fechado no meio. */
+    fun writeAtomic(f: File, data: ByteArray) {
+        try {
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeBytes(data)
+            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+        } catch (_: Throwable) {
+        }
+    }
 
     private fun marker(dir: File) = File(dir, ".pronto")
     private fun info(dir: File) = File(dir, ".info")
@@ -229,13 +259,22 @@ class TorrentStream(
     @Volatile private var closed = false
     @Volatile private var complete = false
     @Volatile private var waitingPiece = -1
-    /** Último byte do arquivo entregue ao player (onde a reprodução está lendo). */
+    /** Onde a reprodução está lendo (posição da conexão mais recente do player). */
     @Volatile private var readPos = 0L
     @Volatile private var lastDone = 0L
+    /**
+     * Posição de cada conexão aberta pelo player. Ele costuma abrir mais de uma ao mesmo tempo
+     * (por exemplo, o começo do vídeo e o índice que fica no final do arquivo); todas precisam
+     * dos seus pedaços com urgência, senão a reprodução não começa.
+     */
+    private val readers = ConcurrentHashMap<Long, Long>()
+    private val readerSeq = AtomicLong()
+    private var windowKey = ""
+    private var fileIndex = 0
+    @Volatile private var resumeLatch: CountDownLatch? = null
 
     /** Pasta do episódio (para guardar o ponto em que parou). */
     val folder: File? get() = dir
-    private var windowStart = -1
     @Volatile private var handle: TorrentHandle? = null
     private var session: SessionManager? = null
     private var server: ServerSocket? = null
@@ -247,7 +286,6 @@ class TorrentStream(
     private var lastPiece = 0
     private var firstPiece = 0
     private var infoHash: org.libtorrent4j.Sha1Hash? = null
-    private var deadlineFrom = -1
 
     fun start() {
         Thread({ run() }, "torrent").start()
@@ -269,6 +307,14 @@ class TorrentStream(
 
     private fun run() {
         try {
+            // Se o player anterior ainda está encerrando o download dele, espera terminar
+            // (dois downloads mexendo no mesmo arquivo travam um ao outro).
+            var waited = 0
+            while (stopping.get() > 0 && waited < 200 && !closed) {
+                if (waited == 0) status(Status(Phase.METADATA, "Encerrando o download anterior…"))
+                Thread.sleep(100); waited++
+            }
+            if (closed) return
             val s = SessionManager()
             session = s
             // Gravação simples em disco (sem mapear o arquivo na memória): mais leve para a TV.
@@ -276,9 +322,15 @@ class TorrentStream(
             params.setPosixDiskIO()
             s.start(params)
             PlayerLog.add("torrent: sessão iniciada")
-            status(Status(Phase.METADATA, "Obtendo as informações do torrent (procurando quem tem o arquivo)…"))
-            val tmp = File(ctx.cacheDir, "magnet").apply { mkdirs() }
-            val data = s.fetchMagnet(magnet, 90, tmp)
+            // Torrent já começado antes: as informações estão guardadas na pasta dele.
+            val known = magnetHash(magnet)?.let { Downloads.findMeta(ctx, it) }
+            var data = known?.let { try { it.readBytes() } catch (_: Throwable) { null } }
+            if (data != null) PlayerLog.add("torrent: informações do torrent lidas de ${known!!.parentFile?.name}")
+            else {
+                status(Status(Phase.METADATA, "Obtendo as informações do torrent (procurando quem tem o arquivo)…"))
+                val tmp = File(ctx.cacheDir, "magnet").apply { mkdirs() }
+                data = s.fetchMagnet(magnet, 90, tmp)
+            }
             if (closed) return
             if (data == null) {
                 fail("Ninguém respondeu com as informações do torrent em 90 segundos. Escolha outro lançamento (com mais seeds).")
@@ -288,6 +340,7 @@ class TorrentStream(
             val fs = ti.files()
             val idx = chooseFile(ti)
             PlayerLog.add("torrent: ${ti.numFiles()} arquivo(s), escolhido #$idx ${fs.fileName(idx)} (${fs.fileSize(idx)} bytes), pedaço ${ti.pieceLength()} bytes")
+            fileIndex = idx
             fileOffset = fs.fileOffset(idx)
             fileSize = fs.fileSize(idx)
             pieceLength = ti.pieceLength()
@@ -340,6 +393,9 @@ class TorrentStream(
             }
             d.mkdirs()
             Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize, magnet)
+            val meta = Downloads.metaFile(d)
+            if (meta.length() == 0L) Downloads.writeAtomic(meta, data)
+            val resume = Downloads.resumeFile(d).takeIf { it.length() > 0 }
             val free = StatFs(d.absolutePath).availableBytes
             if (free < fileSize - Downloads.size(d) + 50L * 1024 * 1024) {
                 fail("A TV não tem espaço livre suficiente (${Downloads.human(free)} livres, o episódio tem ${Downloads.human(fileSize)}).")
@@ -353,9 +409,21 @@ class TorrentStream(
                 override fun alert(alert: Alert<*>) {
                     try {
                         val type = alert.type()
-                        if (type != AlertType.ADD_TORRENT && type != AlertType.TORRENT_FINISHED) return
+                        if (type != AlertType.ADD_TORRENT && type != AlertType.TORRENT_FINISHED &&
+                            type != AlertType.SAVE_RESUME_DATA && type != AlertType.SAVE_RESUME_DATA_FAILED) return
                         val h = (alert as? TorrentAlert<*>)?.handle() ?: return
                         if (!h.isValid || h.infoHash().toHex() != hash) return
+                        if (type == AlertType.SAVE_RESUME_DATA) {
+                            if (!complete) Downloads.writeAtomic(Downloads.resumeFile(d),
+                                AddTorrentParams.writeResumeDataBuf((alert as SaveResumeDataAlert).params()))
+                            resumeLatch?.countDown()
+                            return
+                        }
+                        if (type == AlertType.SAVE_RESUME_DATA_FAILED) {
+                            PlayerLog.add("torrent: não consegui guardar o andamento")
+                            resumeLatch?.countDown()
+                            return
+                        }
                         PlayerLog.add("torrent: alerta $type")
                         // O handle que vem no alerta deixa de valer quando o alerta é descartado
                         // (usá-lo depois derruba o app). Pega uma cópia própria pela sessão.
@@ -374,8 +442,8 @@ class TorrentStream(
             val prio = Priority.array(Priority.IGNORE, ti.numFiles())
             prio[idx] = Priority.TOP_PRIORITY
             status(Status(Phase.CONNECTING, "Conectando às pessoas que têm o episódio…", total = fileSize))
-            s.download(ti, d, null, prio, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
-            PlayerLog.add("torrent: download pedido em ${d.absolutePath}")
+            s.download(ti, d, resume, prio, null, TorrentFlags.SEQUENTIAL_DOWNLOAD)
+            PlayerLog.add("torrent: download pedido em ${d.absolutePath}" + if (resume != null) " (continuando de onde parou)" else "")
 
             val srv = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
             server = srv
@@ -385,17 +453,27 @@ class TorrentStream(
             onReady("http://127.0.0.1:${srv.localPort}/$name")
 
             // Atualiza o andamento a cada segundo, enquanto baixa.
+            var tick = 0
             while (!closed && !complete) {
                 Thread.sleep(1000)
+                tick++
                 val h = handle ?: refind() ?: continue
                 val st = try { h.status() } catch (e: RuntimeException) { handle = null; continue }
-                val done = try { h.fileProgress().getOrElse(idx) { 0L } } catch (e: RuntimeException) { 0L }
+                val state = st.state().name
+                val checking = state.contains("CHECKING")
+                val done = if (checking) lastDone else try { h.fileProgress().getOrElse(idx) { 0L } } catch (e: RuntimeException) { lastDone }
                 lastDone = done
-                val ahead = try { keepWindow(h) } catch (e: RuntimeException) { 0L }
-                val checking = st.state().name.contains("CHECKING")
+                readers.maxByOrNull { it.key }?.let { readPos = it.value }
+                val ahead = try { keepWindow(h); aheadOf(h) } catch (e: RuntimeException) { 0L }
+                if (tick % 15 == 0) PlayerLog.add("torrent: $state, ${st.numPeers()} pessoa(s), ${st.downloadRate() / 1024} KB/s, ${if (fileSize > 0) done * 100 / fileSize else 0}%, lendo ${readers.values.joinToString { Downloads.human(it) }}")
+                // Guarda o andamento de tempos em tempos (se a TV desligar, continua daqui).
+                if (tick % 30 == 0 && !checking) {
+                    try { h.saveResumeData() } catch (_: RuntimeException) {}
+                    if (fileSize > 0) Downloads.updateInfo(d, "percent" to (done * 100 / fileSize).toInt())
+                }
                 val phase = if (st.numPeers() == 0 || checking) Phase.CONNECTING else Phase.DOWNLOADING
                 val msg = when {
-                    checking -> "Conferindo o que já tinha sido baixado…"
+                    checking -> "Conferindo o que já tinha sido baixado… ${(st.progress() * 100).toInt()}%"
                     phase == Phase.CONNECTING -> "Conectando às pessoas que têm o episódio…"
                     else -> "Baixando o episódio…"
                 }
@@ -408,30 +486,44 @@ class TorrentStream(
         }
     }
 
+    private fun pieceOf(pos: Long) = ((fileOffset + pos) / pieceLength).toInt().coerceIn(firstPiece, lastPiece)
+
     /**
-     * Mantém o download concentrado logo à frente do ponto de reprodução: os próximos ~48 MB
-     * ficam com prioridade máxima e prazo curto; o resto do episódio baixa depois, com
-     * prioridade baixa. Devolve quantos bytes à frente já estão baixados sem buracos.
+     * Mantém o download concentrado onde o player está lendo: os próximos ~48 MB da conexão
+     * mais recente e alguns pedaços de cada outra conexão aberta (por exemplo, o índice no
+     * final do arquivo) ficam com prioridade máxima e prazo curto; o resto do episódio baixa
+     * depois, com prioridade baixa.
      */
-    private fun keepWindow(h: TorrentHandle): Long {
-        val cur = ((fileOffset + readPos) / pieceLength).toInt().coerceIn(firstPiece, lastPiece)
+    @Synchronized
+    private fun keepWindow(h: TorrentHandle) {
+        val curs = readers.entries.sortedByDescending { it.key }.map { pieceOf(it.value) }.distinct()
+            .ifEmpty { listOf(pieceOf(readPos)) }
+        val key = curs.joinToString(",")
+        if (key == windowKey) return
+        windowKey = key
         val size = (WINDOW_BYTES / pieceLength).toInt().coerceIn(8, 400)
-        val end = minOf(lastPiece, cur + size)
-        if (cur != windowStart) {
-            // Ponto de leitura mudou (andou ou pulou): refaz prioridades e prazos.
-            windowStart = cur
-            val total = h.torrentFile()?.numPieces() ?: (lastPiece + 1)
-            val prio = Array(total) { Priority.IGNORE }
-            for (p in firstPiece..lastPiece) prio[p] = if (p in cur..end) Priority.TOP_PRIORITY else Priority.LOW
-            h.prioritizePieces(prio)
-            h.clearPieceDeadlines()
+        val total = h.torrentFile()?.numPieces() ?: (lastPiece + 1)
+        val prio = Array(total) { Priority.IGNORE }
+        for (p in firstPiece..lastPiece) prio[p] = Priority.LOW
+        val ranges = curs.mapIndexed { i, cur -> cur..minOf(lastPiece, cur + if (i == 0) size else READAHEAD * 2) }
+        for (r in ranges) for (p in r) prio[p] = Priority.TOP_PRIORITY
+        h.prioritizePieces(prio)
+        h.clearPieceDeadlines()
+        // Os primeiros pedaços de cada conexão recebem os prazos mais curtos.
+        for (r in ranges) {
             var k = 0
-            for (p in cur..end) if (!h.havePiece(p)) h.setPieceDeadline(p, 150 * k++)
+            for (p in r) if (!h.havePiece(p)) h.setPieceDeadline(p, 150 * k++)
         }
-        var p = cur
-        while (p <= lastPiece && h.havePiece(p)) p++
+    }
+
+    /** Quantos bytes à frente do ponto de reprodução já estão baixados sem buracos. */
+    private fun aheadOf(h: TorrentHandle): Long {
+        val pos = readPos
+        var p = pieceOf(pos)
+        var n = 0
+        while (p <= lastPiece && h.havePiece(p) && n++ < 2000) p++
         val aheadEnd = minOf(fileSize, p.toLong() * pieceLength - fileOffset)
-        return maxOf(0L, aheadEnd - readPos)
+        return maxOf(0L, aheadEnd - pos)
     }
 
     /** Arquivo do episódio dentro do torrent (pacotes trazem vários). */
@@ -454,7 +546,10 @@ class TorrentStream(
         }
         val d = dir
         val v = video
-        if (d != null && v != null) Downloads.markDone(d, v)
+        if (d != null && v != null) {
+            Downloads.markDone(d, v)
+            Downloads.resumeFile(d).delete()
+        }
         status(Status(Phase.COMPLETE, "Download concluído. Compartilhamento encerrado.", done = fileSize, total = fileSize))
         Thread { stopSession() }.start()
     }
@@ -468,8 +563,11 @@ class TorrentStream(
         closed = true
         try { server?.close() } catch (_: Throwable) {}
         val d = dir
-        if (!complete && d != null && fileSize > 0) Downloads.updateInfo(d, "percent" to (lastDone * 100 / fileSize).toInt())
-        Thread { stopSession() }.start()
+        if (!complete && d != null && fileSize > 0 && lastDone > 0) Downloads.updateInfo(d, "percent" to (lastDone * 100 / fileSize).toInt())
+        stopping.incrementAndGet()
+        Thread {
+            try { stopSession() } finally { stopping.decrementAndGet() }
+        }.start()
     }
 
     @Synchronized
@@ -477,10 +575,22 @@ class TorrentStream(
         val s = session ?: return
         session = null
         try {
-            handle?.let { if (it.isValid) s.remove(it) }
+            val h = handle?.takeIf { it.isValid }
+            if (h != null && !complete) {
+                // Guarda o mapa do que já foi baixado antes de fechar.
+                val latch = CountDownLatch(1)
+                resumeLatch = latch
+                try {
+                    h.saveResumeData(TorrentHandle.FLUSH_DISK_CACHE)
+                    if (!latch.await(5, TimeUnit.SECONDS)) PlayerLog.add("torrent: demorou para guardar o andamento")
+                } catch (_: Throwable) {
+                }
+            }
+            h?.let { s.remove(it) }
             s.stop()
         } catch (_: Throwable) {
         }
+        PlayerLog.add("torrent: sessão encerrada")
     }
 
     // ---------- servidor local para o player ----------
@@ -536,10 +646,16 @@ class TorrentStream(
         val buf = ByteArray(64 * 1024)
         var pos = start
         var raf: RandomAccessFile? = null
+        val id = readerSeq.incrementAndGet()
+        readers[id] = start
         try {
             while (pos <= end && !closed) {
                 val piece = ((fileOffset + pos) / pieceLength).toInt()
-                waitForPiece(piece)
+                readers[id] = pos
+                if (!waitForPiece(piece, c)) {
+                    PlayerLog.add("http: o player desistiu da conexão em ${Downloads.human(pos)}")
+                    return
+                }
                 if (raf == null) raf = RandomAccessFile(video!!, "r")
                 val pieceEnd = (piece + 1).toLong() * pieceLength - fileOffset // primeiro byte do próximo pedaço
                 val chunkEnd = minOf(end + 1, pieceEnd)
@@ -549,18 +665,24 @@ class TorrentStream(
                     if (n <= 0) { Thread.sleep(50); continue }
                     out.write(buf, 0, n)
                     pos += n
-                    readPos = pos
+                    readers[id] = pos
                 }
             }
             out.flush()
         } finally {
+            readers.remove(id)
             raf?.close()
         }
     }
 
-    /** Espera o pedaço chegar, pedindo prioridade máxima para ele e os próximos. */
-    private fun waitForPiece(piece: Int) {
-        if (complete) return
+    /**
+     * Espera o pedaço chegar, com prioridade máxima para ele e os próximos.
+     * Devolve false se o player fechou a conexão enquanto esperava.
+     */
+    private fun waitForPiece(piece: Int, c: Socket): Boolean {
+        if (complete) return true
+        var logged = false
+        var n = 0
         while (!closed && !complete) {
             val h = handle ?: refind()
             if (h != null && h.isValid) {
@@ -572,23 +694,35 @@ class TorrentStream(
                 }
                 if (have) {
                     if (waitingPiece == piece) waitingPiece = -1
-                    return
+                    return true
                 }
-                if (deadlineFrom != piece) {
-                    deadlineFrom = piece
+                // Garante que este pedaço está entre os urgentes (refaz se a janela mudou).
+                try { keepWindow(h) } catch (_: RuntimeException) {}
+                if (!logged) {
+                    logged = true
                     PlayerLog.add("http: esperando o pedaço $piece")
-                    for (i in 0 until READAHEAD) {
-                        val p = piece + i
-                        if (p > lastPiece) break
-                        h.setPieceDeadline(p, i * 300)
-                    }
                 }
             }
             waitingPiece = piece
             Thread.sleep(100)
+            if (++n % 10 == 0 && clientGone(c)) {
+                if (waitingPiece == piece) waitingPiece = -1
+                return false
+            }
         }
         if (closed) throw InterruptedException()
         waitingPiece = -1
+        return true
+    }
+
+    /** O player fechou a conexão? (lê sem esperar: -1 quer dizer que o outro lado fechou) */
+    private fun clientGone(c: Socket): Boolean = try {
+        c.soTimeout = 1
+        c.getInputStream().read() == -1
+    } catch (_: java.net.SocketTimeoutException) {
+        false
+    } catch (_: Throwable) {
+        true
     }
 
     /** Cópia própria do handle, pedida à sessão (nunca a do alerta). */
@@ -598,6 +732,31 @@ class TorrentStream(
     }
 
     companion object {
+        /** Downloads que ainda estão sendo encerrados (de um player que acabou de fechar). */
+        private val stopping = AtomicInteger()
+
+        /** Identificador (info hash) do link magnético, em hexadecimal minúsculo. */
+        fun magnetHash(magnet: String): String? {
+            val v = Regex("""xt=urn:btih:([0-9A-Za-z]+)""").find(magnet)?.groupValues?.get(1) ?: return null
+            if (v.length == 40) return v.lowercase()
+            if (v.length != 32) return null
+            val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            val out = StringBuilder()
+            var buffer = 0L
+            var bits = 0
+            for (ch in v.uppercase()) {
+                val x = alphabet.indexOf(ch)
+                if (x < 0) return null
+                buffer = (buffer shl 5) or x.toLong()
+                bits += 5
+                if (bits >= 8) {
+                    bits -= 8
+                    out.append(String.format("%02x", (buffer shr bits) and 0xff))
+                }
+            }
+            return out.toString()
+        }
+
         private val VIDEO_EXT = setOf("mkv", "mp4", "avi", "webm", "m4v", "ts")
         private const val READAHEAD = 6
         private const val WINDOW_BYTES = 48L * 1024 * 1024
