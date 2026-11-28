@@ -121,6 +121,7 @@ class MainActivity : Activity() {
             HomeWorker.runNow(this)
         }
         findViewById<Button>(R.id.btnSettings).setOnClickListener { openSettings() }
+        findViewById<Button>(R.id.btnDownloads).setOnClickListener { showSaved() }
         btnFav.setOnClickListener {
             prefs.onlyFavorites = !prefs.onlyFavorites
             updateFavButton()
@@ -412,7 +413,7 @@ class MainActivity : Activity() {
     }
 
     private fun onAnimeClick(a: Airing) {
-        if (a.anime.crunchyrollUrl == null) {
+        if (a.anime.crunchyrollUrl == null || prefs.crViaNyaa) {
             onOtherServiceClick(a)
             return
         }
@@ -455,19 +456,53 @@ class MainActivity : Activity() {
             else -> "▶ Buscar episódio ${a.episode} legendado (PT-BR)"
         }
         actions += label to { searchNyaa(a, a.episode) }
-        if (a.episode > 1) actions += "Episódios anteriores…" to { chooseEarlierEpisode(a) }
+        actions += (if (a.episode > 1) "Episódios anteriores…" else "Temporadas anteriores…") to { chooseEarlierEpisode(a) }
+        if (a.anime.crunchyrollUrl != null) actions += "Abrir no Crunchyroll" to { watchEpisode(a) }
         for (st in a.anime.streams) actions += "Abrir no ${st.site}" to { openUrl(st.url) }
         actions += (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
-        val where = a.anime.streams.joinToString(", ") { it.site }.ifEmpty { "serviço não informado" }
+        val sites = (if (a.anime.crunchyrollUrl != null) listOf("Crunchyroll") else emptyList()) + a.anime.streams.map { it.site }
+        val where = sites.joinToString(", ").ifEmpty { "serviço não informado" }
         val note = if (a.delayed) " • exibido no Japão há 1 semana" else ""
         dialog().setTitle("${a.anime.title} — Ep. ${a.episode}\n($where$note)")
             .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
             .show()
     }
 
-    /** Segunda janela: lista os episódios anteriores (do mais recente para o primeiro). */
-    private fun chooseEarlierEpisode(a: Airing) {
-        val eps = (a.episode - 1 downTo maxOf(1, a.episode - 60)).toList()
+    /** Temporada anterior de cada anime já consultada no AniList (null = não tem). */
+    private val prequels = HashMap<Int, AniList.Prequel?>()
+
+    /**
+     * Segunda janela: lista os episódios anteriores (do mais recente para o primeiro) e, no
+     * fim, a temporada anterior, se houver. [wholeSeason] = é uma temporada anterior inteira
+     * ([a].episode é o último episódio dela); [back] = para onde o Voltar leva.
+     */
+    private fun chooseEarlierEpisode(a: Airing, wholeSeason: Boolean = false, back: (() -> Unit)? = null) {
+        val id = a.anime.id
+        val cached = prequels.containsKey(id)
+        if (!cached) {
+            var job: Job? = null
+            val prog = progressDialog(a.anime.title, "Procurando temporadas anteriores no AniList…") { job?.cancel() }
+            job = scope.launch {
+                val pre = try {
+                    withContext(Dispatchers.IO) { AniList.fetchPrequel(id) }.also { prequels[id] = it }
+                } catch (e: CancellationException) {
+                    prog.dialog.dismiss(); throw e
+                } catch (_: Exception) { null }
+                prog.dialog.dismiss()
+                showEarlier(a, wholeSeason, back, pre)
+            }
+        } else showEarlier(a, wholeSeason, back, prequels[id])
+    }
+
+    private fun showEarlier(a: Airing, wholeSeason: Boolean, back: (() -> Unit)?, pre: AniList.Prequel?) {
+        val last = if (wholeSeason) a.episode else a.episode - 1
+        val eps = if (last < 1) emptyList() else (last downTo maxOf(1, last - 99)).toList()
+        val goBack = back ?: { onOtherServiceClick(a) }
+        if (eps.isEmpty() && pre == null) {
+            toast("Não há episódios anteriores nem temporada anterior.")
+            goBack()
+            return
+        }
         val mine = Downloads.saved(this).filter { it.animeId == a.anime.id }
         val done = mine.filter { it.complete }.map { it.episode }.toSet()
         val partial = mine.filter { !it.complete }.map { it.episode }.toSet()
@@ -477,10 +512,79 @@ class MainActivity : Activity() {
                 in partial -> "Episódio $it • em andamento"
                 else -> "Episódio $it"
             }
+        }.toMutableList()
+        if (pre != null) labels += "◀ Temporada anterior: ${pre.anime.title} (${pre.episodes} episódios)"
+        dialog().setTitle(if (wholeSeason) "${a.anime.title} — episódios" else "${a.anime.title} — episódios anteriores")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which < eps.size) searchNyaa(a, eps[which])
+                else if (pre != null) chooseEarlierEpisode(Airing(prequelWithSeason(a.anime, pre.anime), pre.episodes, 0L), true) {
+                    showEarlier(a, wholeSeason, back, pre)
+                }
+            }
+            .setNegativeButton("Voltar") { _, _ -> goBack() }
+            .show()
+    }
+
+    /** A temporada anterior de uma "Season N" é a N-1 (ajuda a não pegar episódios da temporada errada). */
+    private fun prequelWithSeason(current: Anime, prequel: Anime): Anime {
+        val s = current.seasonHint ?: Nyaa.seasonFromNames(listOf(current.title) + current.altTitles) ?: return prequel
+        if (Nyaa.seasonFromNames(listOf(prequel.title) + prequel.altTitles) != null || s < 2) return prequel
+        return prequel.copy(seasonHint = s - 1)
+    }
+
+    // ---------- baixados ----------
+
+    /** Tudo o que está baixado ou em andamento, do usado mais recentemente para o mais antigo. */
+    private fun showSaved() {
+        val list = Downloads.saved(this).sortedByDescending { it.lastActivity }
+        if (list.isEmpty()) {
+            dialog().setTitle("Baixados")
+                .setMessage("Nenhum episódio baixado ou em andamento.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val fmt = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR"))
+        val labels = list.map { sv ->
+            val name = sv.title.ifBlank { sv.release }
+            val state = if (sv.complete) "✔ baixado" else "⏳ ${sv.percent}% baixado"
+            val stop = if (sv.pos > 30) " • parou em ${clock(sv.pos)}" else ""
+            val dub = if (sv.dub) " • dublado em inglês" else ""
+            val whenTxt = if (sv.lastActivity > 0) " • ${fmt.format(java.util.Date(sv.lastActivity))}" else ""
+            "$name — Ep. ${sv.episode}\n$state$stop$dub • ${Downloads.human(sv.size)}$whenTxt"
         }.toTypedArray()
-        dialog().setTitle("${a.anime.title} — episódios anteriores")
-            .setItems(labels) { _, which -> searchNyaa(a, eps[which]) }
-            .setNegativeButton("Voltar") { _, _ -> onOtherServiceClick(a) }
+        dialog().setTitle("Baixados e em andamento (${list.size})")
+            .setItems(labels) { _, which -> savedActions(list[which]) }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    private fun savedActions(sv: Downloads.Saved) {
+        val name = sv.title.ifBlank { sv.release }
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        if (sv.complete) {
+            if (sv.pos > 30) {
+                actions += "▶ Continuar de ${clock(sv.pos)}" to { playSaved(name, sv.animeId, sv.episode, sv, sv.pos) }
+                actions += "Assistir do começo" to { playSaved(name, sv.animeId, sv.episode, sv, 0) }
+            } else actions += "▶ Assistir" to { playSaved(name, sv.animeId, sv.episode, sv, 0) }
+        } else {
+            val from = if (sv.pos > 30) ", de ${clock(sv.pos)}" else ""
+            actions += "▶ Continuar (${sv.percent}% baixado$from)" to { resumeDownload(name, sv.animeId, sv.episode, sv) }
+        }
+        actions += "Apagar" to {
+            if (sv.dir.absolutePath in Downloads.inUse) toast("Esse episódio está sendo usado agora.")
+            else dialog().setTitle("Apagar $name — Ep. ${sv.episode}?")
+                .setMessage("${Downloads.human(sv.size)} serão liberados.")
+                .setPositiveButton("Apagar") { _, _ ->
+                    sv.dir.deleteRecursively()
+                    toast("Apagado.")
+                    showSaved()
+                }
+                .setNegativeButton("Voltar") { _, _ -> savedActions(sv) }
+                .show()
+        }
+        dialog().setTitle("$name — Ep. ${sv.episode}")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .setNegativeButton("Voltar") { _, _ -> showSaved() }
             .show()
     }
 
@@ -543,24 +647,30 @@ class MainActivity : Activity() {
     private fun clock(s: Long) = if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
         else String.format("%d:%02d", s / 60, s % 60)
 
-    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved, start: Long) {
+    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved, start: Long) =
+        playSaved(a.anime.title, a.anime.id, episode, sv, start)
+
+    private fun playSaved(title: String, animeId: Int, episode: Int, sv: Downloads.Saved, start: Long) {
         startActivity(Intent(this, PlayerActivity::class.java)
             .putExtra(PlayerActivity.EXTRA_LOCAL_FILE, sv.video!!.absolutePath)
             .putExtra(PlayerActivity.EXTRA_DIR, sv.dir.absolutePath)
-            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+            .putExtra(PlayerActivity.EXTRA_TITLE, title)
             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
-            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+            .putExtra(PlayerActivity.EXTRA_ANIME_ID, animeId)
             .putExtra(PlayerActivity.EXTRA_DUB, sv.dub)
             .putExtra(PlayerActivity.EXTRA_START, start))
     }
 
     /** Download que ficou pela metade: retoma o torrent aproveitando o que já foi baixado. */
-    private fun resumeDownload(a: Airing, episode: Int, sv: Downloads.Saved) {
+    private fun resumeDownload(a: Airing, episode: Int, sv: Downloads.Saved) =
+        resumeDownload(a.anime.title, a.anime.id, episode, sv)
+
+    private fun resumeDownload(title: String, animeId: Int, episode: Int, sv: Downloads.Saved) {
         startActivity(Intent(this, PlayerActivity::class.java)
             .putExtra(PlayerActivity.EXTRA_MAGNET, sv.magnet)
-            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+            .putExtra(PlayerActivity.EXTRA_TITLE, title)
             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
-            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+            .putExtra(PlayerActivity.EXTRA_ANIME_ID, animeId)
             .putExtra(PlayerActivity.EXTRA_RELEASE, sv.release)
             .putExtra(PlayerActivity.EXTRA_DUB, sv.dub)
             .putExtra(PlayerActivity.EXTRA_START, if (sv.pos > 30) sv.pos else 0L))
@@ -575,7 +685,7 @@ class MainActivity : Activity() {
             try {
                 val names = listOf(a.anime.title) + a.anime.altTitles
                 val results = runInterruptible(Dispatchers.IO) {
-                    Nyaa.search(names, episode, lang) { msg -> ui.post { prog.text.text = msg } }
+                    Nyaa.search(names, episode, lang, a.anime.seasonHint) { msg -> ui.post { prog.text.text = msg } }
                 }
                 prog.dialog.dismiss()
                 if (results.isEmpty()) {
@@ -698,6 +808,7 @@ class MainActivity : Activity() {
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
             "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
             "Player dos episódios do Nyaa: ${if (prefs.useAmnis) "Amnis" else "Animes TV"}",
+            "Animes do Crunchyroll: ${if (prefs.crViaNyaa) "buscar no Nyaa (Crunchyroll fora do ar)" else "abrir no Crunchyroll"}",
             "Modo de vídeo do player: ${videoModeName(prefs.videoMode)}",
             "Downloads: ${Downloads.count(this)} episódio(s), ${Downloads.human(Downloads.used(this))} de ${Downloads.capLabel(this)} • ${Downloads.locationName(this)}",
             "Atualizar o canal \"Animes de hoje\" agora",
@@ -718,6 +829,12 @@ class MainActivity : Activity() {
                     toast(if (prefs.useAmnis) "Episódios do Nyaa vão abrir no Amnis" else "Episódios do Nyaa vão tocar no próprio Animes TV")
                 }
                 3 -> {
+                    prefs.crViaNyaa = !prefs.crViaNyaa
+                    HomeWorker.runNow(this)
+                    toast(if (prefs.crViaNyaa) "Animes do Crunchyroll vão ser buscados no Nyaa, como os outros"
+                        else "Animes do Crunchyroll voltam a abrir no Crunchyroll")
+                }
+                4 -> {
                     val labels = (0..3).map { videoModeName(it) }.toTypedArray()
                     dialog().setTitle("Modo de vídeo").setSingleChoiceItems(labels, prefs.videoMode) { d, which ->
                         prefs.videoMode = which
@@ -725,13 +842,13 @@ class MainActivity : Activity() {
                         toast("Modo de vídeo: ${videoModeName(which)}")
                     }.show()
                 }
-                4 -> showDownloads()
-                5 -> {
+                5 -> showDownloads()
+                6 -> {
                     HomeWorker.runNow(this)
                     toast("Publicando… confira o resultado em Diagnóstico daqui a alguns segundos.")
                 }
-                6 -> showDiagnostics()
-                7 -> checkUpdate()
+                7 -> showDiagnostics()
+                8 -> checkUpdate()
             }
         }.show()
     }

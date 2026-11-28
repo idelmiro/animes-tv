@@ -15,7 +15,9 @@ data class Anime(
     /** Outros nomes do anime (inglês, sinônimos), usados na busca do Nyaa. */
     val altTitles: List<String> = emptyList(),
     /** Links de streaming que não são do Crunchyroll (Netflix, Disney+...). */
-    val streams: List<Stream> = emptyList()
+    val streams: List<Stream> = emptyList(),
+    /** Número da temporada, quando se sabe por fora do nome (ex.: a anterior de "Season 2" é a 1). */
+    val seasonHint: Int? = null
 ) {
     /** Nome curto do serviço para o selo do card. */
     val serviceLabel: String?
@@ -72,6 +74,14 @@ class Prefs(context: Context) {
     var videoMode: Int
         get() = sp.getInt("videoMode2", 0)
         set(v) = sp.edit().putInt("videoMode2", v.coerceIn(0, 3)).apply()
+
+    /**
+     * true = animes do Crunchyroll também são buscados no Nyaa, como os de outros serviços
+     * (para quando o Crunchyroll estiver fora do ar).
+     */
+    var crViaNyaa: Boolean
+        get() = sp.getBoolean("crViaNyaa", false)
+        set(v) = sp.edit().putBoolean("crViaNyaa", v).apply()
 
     /** Pasta base dos downloads (null = memória interna). */
     var downloadPath: String?
@@ -186,6 +196,57 @@ object AniList {
 
     private fun parse(o: JSONObject): Airing? {
         val media = o.optJSONObject("media") ?: return null
+        val anime = parseMedia(media) ?: return null
+        return Airing(anime = anime, episode = o.optInt("episode"), airingAt = o.getLong("airingAt"))
+    }
+
+    /** Temporada anterior: o anime e quantos episódios ela teve. */
+    data class Prequel(val anime: Anime, val episodes: Int)
+
+    private val PREQUEL_QUERY = """
+        query (#id: Int) {
+          Media(id: #id) {
+            relations {
+              edges {
+                relationType
+                node {
+                  id type format episodes isAdult
+                  title { romaji english }
+                  synonyms
+                  coverImage { large }
+                  bannerImage
+                  externalLinks { site url type }
+                }
+              }
+            }
+          }
+        }
+    """.trimIndent().replace('#', '$')
+
+    /**
+     * Temporada anterior (série de TV/web) do anime [id], ou null se não houver. Filmes,
+     * especiais e OVAs que aparecem como "anterior" são pulados.
+     */
+    fun fetchPrequel(id: Int): Prequel? {
+        val vars = JSONObject().put("id", id)
+        val json = post(JSONObject().put("query", PREQUEL_QUERY).put("variables", vars).toString())
+        val edges = json.optJSONObject("data")?.optJSONObject("Media")?.optJSONObject("relations")
+            ?.optJSONArray("edges") ?: return null
+        for (i in 0 until edges.length()) {
+            val e = edges.getJSONObject(i)
+            if (e.optString("relationType") != "PREQUEL") continue
+            val node = e.optJSONObject("node") ?: continue
+            if (node.optString("type") != "ANIME") continue
+            if (node.optString("format") !in setOf("TV", "TV_SHORT", "ONA")) continue
+            val eps = node.optInt("episodes", 0)
+            if (eps <= 0) continue
+            val anime = parseMedia(node) ?: continue
+            return Prequel(anime, eps)
+        }
+        return null
+    }
+
+    private fun parseMedia(media: JSONObject): Anime? {
         if (media.optBoolean("isAdult")) return null
         val t = media.optJSONObject("title")
         val title = t?.str("romaji") ?: t?.str("english") ?: return null
@@ -211,11 +272,7 @@ object AniList {
             for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { alt.add(it) }
         }
         alt.remove(title)
-        return Airing(
-            anime = Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage"), alt.toList(), streams),
-            episode = o.optInt("episode"),
-            airingAt = o.getLong("airingAt")
-        )
+        return Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage"), alt.toList(), streams)
     }
 
     private fun post(body: String): JSONObject {
