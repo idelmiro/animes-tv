@@ -596,25 +596,31 @@ class MainActivity : Activity() {
                     return@launch
                 }
                 val shown = results.take(12)
+                val onlySecondary = shown.none { !it.secondary }
                 val labels = shown.map { r ->
                     val kind = if (r.batch) " • pacote" else ""
                     val big = if (!r.batch && tooBig(r.size)) " • maior que ${Downloads.capLabel(this@MainActivity)} (vai pedir confirmação)" else ""
-                    "${r.seeders} seeds • ${r.size}$big • ${lang.short} no ${r.via}$kind\n${r.title}"
+                    val what = if (r.secondary) "⚠ ${r.note.replaceFirstChar { it.uppercase() }}, no ${r.via}" else "${lang.short} no ${r.via}"
+                    "${r.seeders} seeds • ${r.size}$big • $what$kind\n${r.title}"
                 }.toTypedArray()
-                dialog().setTitle(heading)
+                val play = { r: Nyaa.Result ->
+                    if (prefs.useAmnis) openInAmnis(r, episode)
+                    else startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
+                        .putExtra(PlayerActivity.EXTRA_MAGNET, r.magnet)
+                        .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
+                        .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
+                        .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+                        .putExtra(PlayerActivity.EXTRA_RELEASE, r.title)
+                        .putExtra(PlayerActivity.EXTRA_DUB, dubbed))
+                }
+                val b = dialog().setTitle(if (onlySecondary) "$heading — sem PT-BR, só português de Portugal" else heading)
                     .setItems(labels) { _, which ->
                         val r = shown[which]
-                        if (prefs.useAmnis) openInAmnis(r, episode)
-                        else startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
-                            .putExtra(PlayerActivity.EXTRA_MAGNET, r.magnet)
-                            .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
-                            .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
-                            .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
-                            .putExtra(PlayerActivity.EXTRA_RELEASE, r.title)
-                            .putExtra(PlayerActivity.EXTRA_DUB, dubbed))
+                        if (r.secondary) confirmPortugal(r) { play(r) } else play(r)
                     }
                     .setNegativeButton("Fechar", null)
-                    .show()
+                if (onlySecondary && !dubbed) b.setNeutralButton("Buscar dublado em inglês") { _, _ -> searchNyaaNow(a, episode, Nyaa.Lang.EN_DUB) }
+                b.show()
             } catch (e: CancellationException) {
                 prog.dialog.dismiss()
                 throw e
@@ -624,6 +630,22 @@ class MainActivity : Activity() {
                     .setPositiveButton("OK", null).show()
             }
         }
+    }
+
+    /** Legenda de Portugal (ou sem dizer qual): avisa a diferença antes de assistir. */
+    private fun confirmPortugal(r: Nyaa.Result, go: () -> Unit) {
+        val unknown = !r.note.contains("Portugal")
+        val first = if (unknown)
+            "Este lançamento tem legenda em português, mas não diz se é do Brasil ou de Portugal. Pode ser de Portugal."
+        else "Este lançamento não tem legenda do Brasil: a legenda é em português de Portugal."
+        dialog().setTitle(if (unknown) "Português: Brasil ou Portugal?" else "Legenda em português de Portugal")
+            .setMessage("$first\n\nDá para entender tudo, mas algumas palavras e o jeito de falar são diferentes, por exemplo:\n" +
+                "• \"ecrã\" em vez de \"tela\", \"telemóvel\" em vez de \"celular\", \"autocarro\" em vez de \"ônibus\"\n" +
+                "• \"tu\" e \"vós\" no lugar de \"você\" e \"vocês\"\n" +
+                "• \"estou a fazer\" em vez de \"estou fazendo\"\n\n${r.title}")
+            .setPositiveButton("Assistir mesmo assim") { _, _ -> go() }
+            .setNegativeButton("Voltar", null)
+            .show()
     }
 
     /** Tamanho do Nyaa ("1.4 GiB", "650.2 MiB") passa do limite de downloads? */

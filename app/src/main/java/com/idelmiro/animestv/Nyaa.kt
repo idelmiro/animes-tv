@@ -31,11 +31,25 @@ object Nyaa {
         "udp://tracker.torrent.eu.org:451/announce",
     )
 
-    /** PT-BR; "Portuguese" sozinho vale, mas "Portuguese (European)" não. */
-    private val PTBR_RE = Regex(
-        """pt[-_ .]?br|por[-_ ]?br|brazil|brasil|legendado|\[pt]|portugu(?:ese|[eê]s)(?![a-z])(?![\s*_(\[]*(?:european|europeu|portugal|pt[-_]?pt))""",
+    // ---------- idioma ----------
+    //
+    // As descrições variam muito: "Portuguese (Brazilian)", "NF_Portuguese(Brazil)", "PT(BR)",
+    // "pt-BR", "Legendado"… Português de Portugal aparece como "Portuguese (European)",
+    // "PT(EU)", "pt-PT"; e às vezes só "Portuguese", sem dizer qual.
+
+    /** Português do Brasil. */
+    private val BR = Regex(
+        """(?<![a-z])(?:pt|por)\W{0,2}br(?![a-z])|(?<![a-z])pob(?![a-z])|brazil|brasil|legendado""",
         RegexOption.IGNORE_CASE
     )
+    /** Português de Portugal. */
+    private val PT_EU = Regex(
+        """(?<![a-z])pt\W{0,2}(?:pt|eu)(?![a-z])|portugu\w*\W{0,8}(?:nf_portuguese\W{0,3})?(?:european|europeu|portugal)|european\W{0,3}portugu|de portugal""",
+        RegexOption.IGNORE_CASE
+    )
+    /** Português sem dizer qual. */
+    private val PT_ANY = Regex("""portugu(?:ese|[eê]s)(?![a-z])|\[pt]""", RegexOption.IGNORE_CASE)
+
     /** Lançamentos com várias legendas (costumam ficar na categoria em inglês e trazer PT-BR). */
     private val MULTI = Regex("""multi[-_ .]?subs?|multiple[-_ .]subtitles?|multi(?![a-z])""", RegexOption.IGNORE_CASE)
     private const val MAX_MULTI_CHECKS = 4
@@ -52,19 +66,34 @@ object Nyaa {
     )
     private const val DUB_QUERY = "(dub|dubbed|dual|multi-audio|eng-dub)"
 
+    /** O que foi encontrado no texto: o idioma pedido ou uma opção secundária (com aviso). */
+    internal class Found(val secondary: Boolean, val note: String)
+
+    private val FOUND_MAIN = Found(false, "")
+    private val FOUND_EU = Found(true, "português de Portugal")
+    private val FOUND_UNKNOWN = Found(true, "português (não diz se é do Brasil)")
+
     /** O que procurar: legenda em português ou dublagem em inglês. */
     enum class Lang(
         internal val category: String,
         internal val query: String,
-        internal val inTitle: Regex,
-        internal val inPage: Regex,
         /** "com legenda PT-BR" / "dublado em inglês" */
         val label: String,
         /** Curto, para a lista de resultados. */
         val short: String
     ) {
-        PTBR("1_3", PTBR_QUERY, PTBR_RE, PTBR_RE, "com legenda PT-BR", "PT-BR"),
-        EN_DUB("1_2", DUB_QUERY, DUB, DUB_DESC, "dublado em inglês", "Dublado")
+        PTBR("1_3", PTBR_QUERY, "com legenda PT-BR", "PT-BR"),
+        EN_DUB("1_2", DUB_QUERY, "dublado em inglês", "Dublado");
+
+        internal fun classify(text: String, page: Boolean): Found? = when (this) {
+            PTBR -> when {
+                BR.containsMatchIn(text) -> FOUND_MAIN
+                PT_EU.containsMatchIn(text) -> FOUND_EU
+                PT_ANY.containsMatchIn(text) -> FOUND_UNKNOWN
+                else -> null
+            }
+            EN_DUB -> if ((if (page) DUB_DESC else DUB).containsMatchIn(text)) FOUND_MAIN else null
+        }
     }
 
     data class Result(
@@ -73,10 +102,14 @@ object Nyaa {
         val size: String,
         val infoHash: String,
         val pageUrl: String,
-        /** Onde o PT-BR foi confirmado: "título", "descrição" ou "arquivos". */
+        /** Onde o idioma foi confirmado: "título", "descrição" ou "arquivos". */
         val via: String,
         /** true quando é um pacote com vários episódios (o Amnis pede para escolher o arquivo). */
-        val batch: Boolean
+        val batch: Boolean,
+        /** Opção secundária: português de Portugal (ou sem dizer qual), não do Brasil. */
+        val secondary: Boolean = false,
+        /** Qual é a opção secundária ("português de Portugal"…). */
+        val note: String = ""
     ) {
         val magnet: String
             get() = "magnet:?xt=urn:btih:$infoHash&dn=${Uri.encode(title)}" +
@@ -85,74 +118,123 @@ object Nyaa {
 
     private class Item(val title: String, val seeders: Int, val size: String, val infoHash: String, val pageUrl: String)
 
+    /** Uma busca por nome; [season] > 1 quando o nome é o "nome-base" (sem "Season 2"). */
+    private data class Query(val text: String, val season: Int?)
+
+    private val SEASON_NAME = Regex(
+        """^(.*?)\s+(?:Season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s+Season|S(\d+))$""", RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * Nomes para buscar: o principal, o nome-base da temporada (ex.: "Ao no Hako Season 2" →
+     * "Ao no Hako", aceitando só títulos que digam a temporada 2) e os nomes alternativos.
+     */
+    private fun queries(names: List<String>): List<Query> {
+        val clean = names.map { cleanName(it) }.filter { it.length >= 3 && isLatin(it) }.distinct()
+        val out = ArrayList<Query>()
+        clean.firstOrNull()?.let { out += Query(it, null) }
+        for (n in clean) {
+            val m = SEASON_NAME.find(n) ?: continue
+            val season = (2..4).firstNotNullOfOrNull { m.groupValues[it].toIntOrNull() } ?: continue
+            val base = m.groupValues[1].trim()
+            if (season > 1 && base.length >= 3) {
+                out += Query(base, season)
+                break
+            }
+        }
+        clean.drop(1).forEach { out += Query(it, null) }
+        return out.distinctBy { it.text.lowercase() }.take(3)
+    }
+
+    /** O título diz que é desta temporada? ("S02E07", "Season 2", "2nd Season", "(Season 02)") */
+    private fun hasSeason(title: String, season: Int): Boolean = Regex(
+        """(?<![a-z0-9])S0*$season(?:\s?E\d|(?![0-9]))|season\W{0,2}0*$season(?![0-9])|(?<![0-9])$season(?:st|nd|rd|th)\s+season""",
+        RegexOption.IGNORE_CASE
+    ).containsMatchIn(title)
+
     /**
      * Procura o [episode] do anime pelos [names] (o primeiro é o título principal).
      * Roda em thread de fundo (faz várias consultas de rede).
      */
     fun search(names: List<String>, episode: Int, lang: Lang = Lang.PTBR, progress: (String) -> Unit = {}): List<Result> {
-        val queries = names.map { cleanName(it) }.filter { it.length >= 3 && isLatin(it) }.distinct().take(3)
+        val queries = queries(names)
         if (queries.isEmpty()) throw Exception("o anime não tem um nome em letras latinas para buscar")
         val found = LinkedHashMap<String, Result>()
         var lastError: Exception? = null
         var checks = 0
 
+        fun mainCount() = found.values.count { !it.secondary && !it.batch }
+
         fun status(step: String) {
-            val n = found.size
-            progress("$step\n\n" + if (n == 0) "Nenhum lançamento confirmado ainda." else "$n lançamento(s) ${lang.label} encontrado(s).")
+            val main = found.values.count { !it.secondary }
+            val other = found.size - main
+            val sb = StringBuilder()
+            sb.append(if (main == 0) "Nenhum lançamento ${lang.label} confirmado ainda." else "$main lançamento(s) ${lang.label} encontrado(s).")
+            if (other > 0) sb.append("\n$other em português de Portugal (ou sem dizer qual), como opção secundária.")
+            progress("$step\n\n$sb")
         }
 
-        for ((qi, name) in queries.withIndex()) {
+        /** Guarda o resultado; devolve true se é o idioma pedido (não secundário). */
+        fun keep(it: Item, batch: Boolean, f: Found?, via: String): Boolean {
+            f ?: return false
+            val prev = found[it.infoHash]
+            if (prev == null || (prev.secondary && !f.secondary))
+                found[it.infoHash] = Result(it.title, it.seeders, it.size, it.infoHash, it.pageUrl, via, batch, f.secondary, f.note)
+            return !f.secondary
+        }
+
+        fun isMain(it: Item) = found[it.infoHash]?.secondary == false
+
+        /** Lê a página (descrição e arquivos) e classifica o idioma. */
+        fun checkPage(it: Item, batch: Boolean) {
+            val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { return }
+            if (!keep(it, batch, lang.classify(desc, true), "descrição")) keep(it, batch, lang.classify(files, true), "arquivos")
+        }
+
+        for ((qi, q) in queries.withIndex()) {
+            val name = q.text
             val which = if (queries.size > 1) " (nome ${qi + 1} de ${queries.size})" else ""
+            /** Episódio certo (e, no nome-base, a temporada certa)? null = não serve. */
+            fun episodeOf(it: Item): Boolean? {
+                if (q.season != null && !hasSeason(it.title, q.season)) return null
+                return matchEpisode(it.title, episode)
+            }
             try {
-                // 1) Com os termos do idioma na busca: o título já confirma o idioma.
+                // 1) Com os termos do idioma na busca: o título já diz o idioma.
                 status("Buscando \"$name\" ${lang.label} no Nyaa$which…")
-                val withLang = rss("$name ${lang.query}", lang.category)
-                for (it in withLang) {
-                    if (it.infoHash in found) continue
-                    val batch = matchEpisode(it.title, episode) ?: continue
-                    if (lang.inTitle.containsMatchIn(it.title)) found[it.infoHash] = it.toResult("título", batch)
+                for (it in rss("$name ${lang.query}", lang.category)) {
+                    if (isMain(it)) continue
+                    val batch = episodeOf(it) ?: continue
+                    keep(it, batch, lang.classify(it.title, false), "título")
                 }
                 // 2) Só com o nome: confere a descrição dos que não dizem o idioma no título.
                 Thread.sleep(PAUSE_MS)
                 status("Buscando outros lançamentos de \"$name\"$which…")
-                val all = rss(name, lang.category)
-                for (it in all) {
-                    if (it.infoHash in found) continue
-                    val batch = matchEpisode(it.title, episode) ?: continue
-                    if (lang.inTitle.containsMatchIn(it.title)) {
-                        found[it.infoHash] = it.toResult("título", batch)
-                        continue
-                    }
+                for (it in rss(name, lang.category)) {
+                    if (isMain(it)) continue
+                    val batch = episodeOf(it) ?: continue
+                    if (keep(it, batch, lang.classify(it.title, false), "título")) continue
                     if (checks >= MAX_DESCRIPTION_CHECKS) continue
                     checks++
                     status("Conferindo o idioma na página do lançamento ($checks de no máximo $MAX_DESCRIPTION_CHECKS)…\n${it.title}")
                     Thread.sleep(PAUSE_MS)
-                    val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { continue }
-                    when {
-                        lang.inPage.containsMatchIn(desc) -> found[it.infoHash] = it.toResult("descrição", batch)
-                        lang.inPage.containsMatchIn(files) -> found[it.infoHash] = it.toResult("arquivos", batch)
-                    }
+                    checkPage(it, batch)
                 }
                 // 3) PT-BR: lançamentos multi-legenda ficam na categoria em inglês (1_2), com o
-                //    português só na descrição ("Portuguese (Brazilian)").
-                if (lang == Lang.PTBR && found.values.count { !it.batch } < 3) {
+                //    português só na descrição.
+                if (lang == Lang.PTBR && mainCount() < 3) {
                     Thread.sleep(PAUSE_MS)
                     status("Buscando lançamentos com várias legendas de \"$name\"$which…")
                     var multiChecks = 0
                     for (it in rss(name, "1_2")) {
-                        if (it.infoHash in found) continue
-                        val batch = matchEpisode(it.title, episode) ?: continue
-                        if (PTBR_RE.containsMatchIn(it.title)) {
-                            found[it.infoHash] = it.toResult("título", batch)
-                            continue
-                        }
+                        if (isMain(it)) continue
+                        val batch = episodeOf(it) ?: continue
+                        if (keep(it, batch, lang.classify(it.title, false), "título")) continue
                         if (!MULTI.containsMatchIn(it.title) || multiChecks >= MAX_MULTI_CHECKS) continue
                         multiChecks++
-                        status("Conferindo se tem legenda PT-BR ($multiChecks de no máximo $MAX_MULTI_CHECKS)…\n${it.title}")
+                        status("Conferindo as legendas do lançamento ($multiChecks de no máximo $MAX_MULTI_CHECKS)…\n${it.title}")
                         Thread.sleep(PAUSE_MS)
-                        val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { continue }
-                        if (PTBR_RE.containsMatchIn(desc) || PTBR_RE.containsMatchIn(files))
-                            found[it.infoHash] = it.toResult("descrição", batch)
+                        checkPage(it, batch)
                     }
                 }
             } catch (e: InterruptedException) {
@@ -161,15 +243,13 @@ object Nyaa {
                 lastError = e
                 status("Erro ao consultar o Nyaa: ${e.message}. Tentando continuar…")
             }
-            if (found.values.count { !it.batch } >= 3) break
+            if (mainCount() >= 3) break
             Thread.sleep(PAUSE_MS)
         }
         if (found.isEmpty() && lastError != null) throw lastError
-        // Episódio avulso antes de pacote; dentro de cada grupo, mais seeds primeiro.
-        return found.values.sortedWith(compareBy<Result> { it.batch }.thenByDescending { it.seeders })
+        // PT-BR antes de Portugal; episódio avulso antes de pacote; mais seeds primeiro.
+        return found.values.sortedWith(compareBy<Result> { it.secondary }.thenBy { it.batch }.thenByDescending { it.seeders })
     }
-
-    private fun Item.toResult(via: String, batch: Boolean) = Result(title, seeders, size, infoHash, pageUrl, via, batch)
 
     // ---------- episódio no título ----------
 
@@ -181,6 +261,8 @@ object Nyaa {
         Regex("""\[0*(\d{1,4})(?:v\d)?]"""),                          // "[05]"
     )
     private val TAGS = Regex("""\[[^\]]*]|\([^)]*\)""")
+    /** "Season 2", "2nd Season": não confundir com pacote "2 - 07". */
+    private val SEASON_WORDS = Regex("""season\s*\d+|\d+(?:st|nd|rd|th)\s+season""", RegexOption.IGNORE_CASE)
 
     /** null = não é este episódio; false = episódio avulso; true = pacote que contém o episódio. */
     fun matchEpisode(title: String, episode: Int): Boolean? {
@@ -190,7 +272,7 @@ object Nyaa {
             }
         }
         // Pacotes "01-12" / "01 ~ 12" (fora de colchetes com resolução, ano etc.).
-        val plain = title.replace(TAGS, " ")
+        val plain = title.replace(TAGS, " ").replace(SEASON_WORDS, " ")
         for (m in RANGE.findAll(plain)) {
             val a = m.groupValues[1].toInt()
             val b = m.groupValues[2].toInt()

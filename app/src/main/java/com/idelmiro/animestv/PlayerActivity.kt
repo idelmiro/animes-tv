@@ -499,7 +499,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     private fun pickBrazilianSub() {
         try {
             val n = MPVLib.getPropertyInt("track-list/count") ?: return
-            val br = Regex("""pt[-_]?br|brazil|brasil""", RegexOption.IGNORE_CASE)
+            val br = Regex("""(?<![a-z])pt\W{0,2}br(?![a-z])|(?<![a-z])pob(?![a-z])|brazil|brasil""", RegexOption.IGNORE_CASE)
             val pt = Regex("""^(pt|por|pob)""", RegexOption.IGNORE_CASE)
             var brId = -1
             var anyPt = false
