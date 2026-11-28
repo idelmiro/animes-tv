@@ -54,6 +54,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     private var suggested = false
     private var episode = 0
     private var localDir: File? = null
+    /** Versão dublada em inglês: áudio em inglês e sem a legenda completa. */
+    private var dub = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +63,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         hideSystemBars()
         title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         episode = intent.getIntExtra(EXTRA_EPISODE, 0)
+        dub = intent.getBooleanExtra(EXTRA_DUB, false)
         val magnet = intent.getStringExtra(EXTRA_MAGNET)
         val local = intent.getStringExtra(EXTRA_LOCAL_FILE)
         if (magnet == null && local == null) {
@@ -85,7 +88,8 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
             intent.getIntExtra(EXTRA_ANIME_ID, 0), title, intent.getStringExtra(EXTRA_RELEASE) ?: "",
             onStatus = { s -> ui.post { onTorrent(s) } },
             onReady = { url -> ui.post { load(url) } },
-            onOversize = { size, count, bytes, answer -> ui.post { askOversize(size, count, bytes, answer) } }
+            onOversize = { size, count, bytes, answer -> ui.post { askOversize(size, count, bytes, answer) } },
+            dub = dub
         ).also { it.start() }
         updatePanel()
     }
@@ -351,8 +355,18 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         MPVLib.setOptionString("sub-scale-with-window", "yes")
         MPVLib.setOptionString("sub-use-margins", "no")
         MPVLib.setOptionString("sub-fonts-dir", "/system/fonts")
-        MPVLib.setOptionString("slang", "pt-BR,pt,por,pob")
-        MPVLib.setOptionString("alang", "ja,jpn")
+        if (dub) {
+            // Dublado: áudio em inglês; legenda só a de placas/letreiros (forced), se houver.
+            // A legenda completa continua disponível no botão Legenda (▲).
+            MPVLib.setOptionString("alang", "en,eng,english")
+            MPVLib.setOptionString("slang", "en,eng")
+            MPVLib.setOptionString("subs-with-matching-audio", "no")
+            MPVLib.setOptionString("subs-fallback-forced", "yes")
+            PlayerLog.add("mpv: versão dublada em inglês")
+        } else {
+            MPVLib.setOptionString("slang", "pt-BR,pt,por,pob")
+            MPVLib.setOptionString("alang", "ja,jpn")
+        }
         MPVLib.setOptionString("keep-open", "yes")
         MPVLib.setOptionString("ytdl", "no")
         MPVLib.setOptionString("force-window", "no")
@@ -667,5 +681,6 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         const val EXTRA_LOCAL_FILE = "localFile"
         const val EXTRA_ANIME_ID = "animeId"
         const val EXTRA_RELEASE = "release"
+        const val EXTRA_DUB = "dub"
     }
 }
