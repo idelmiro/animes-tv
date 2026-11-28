@@ -78,6 +78,14 @@ class Prefs(context: Context) {
         get() = sp.getString("downloadPath", null)
         set(v) = sp.edit().putString("downloadPath", v).apply()
 
+    /**
+     * Com pendrive/HD: true = baixa direto no disco (bom para SSD); false = baixa na memória
+     * interna e move quando termina (necessário para HD mecânico e pendrive).
+     */
+    var downloadDirect: Boolean
+        get() = sp.getBoolean("downloadDirect", false)
+        set(v) = sp.edit().putBoolean("downloadDirect", v).apply()
+
     /** Limite total dos downloads, em GB. */
     var downloadCapGb: Int
         get() = sp.getInt("downloadCapGb", 1)

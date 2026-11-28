@@ -520,6 +520,10 @@ class TorrentStream(
     private fun workDir(final: File, stage: File): File {
         if (!Downloads.usesExternal(ctx)) return final
         if (Downloads.size(stage) > 0) return stage
+        if (Prefs(ctx).downloadDirect) {
+            PlayerLog.add("torrent: baixando direto no disco externo")
+            return final
+        }
         Downloads.trimStaging(ctx, stage)
         val free = try { StatFs(Downloads.stagingRoot(ctx).absolutePath).availableBytes } catch (_: Throwable) { 0L }
         if (free < fileSize + 300L * 1024 * 1024) {
