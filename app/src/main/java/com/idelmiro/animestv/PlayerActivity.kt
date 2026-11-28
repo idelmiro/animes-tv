@@ -479,6 +479,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         PlayerLog.add("mpv: evento $eventId")
         ui.post {
             when (eventId) {
+                MPVLib.MPV_EVENT_FILE_LOADED -> if (!dub) pickBrazilianSub()
                 MPVLib.MPV_EVENT_PLAYBACK_RESTART -> {
                     if (!started) ui.postDelayed(statsLogger, 5000)
                     started = true; buffering = false; updatePanel()
@@ -488,6 +489,33 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
                     spinner.visibility = View.GONE
                 }
             }
+        }
+    }
+
+    /**
+     * Lançamentos multi-legenda trazem português do Brasil e de Portugal, às vezes os dois
+     * marcados só como "por". Escolhe a do Brasil pelo nome da faixa.
+     */
+    private fun pickBrazilianSub() {
+        try {
+            val n = MPVLib.getPropertyInt("track-list/count") ?: return
+            val br = Regex("""pt[-_]?br|brazil|brasil""", RegexOption.IGNORE_CASE)
+            val pt = Regex("""^(pt|por|pob)""", RegexOption.IGNORE_CASE)
+            var brId = -1
+            var anyPt = false
+            for (i in 0 until n) {
+                if (MPVLib.getPropertyString("track-list/$i/type") != "sub") continue
+                val lang = MPVLib.getPropertyString("track-list/$i/lang") ?: ""
+                val title = MPVLib.getPropertyString("track-list/$i/title") ?: ""
+                if (pt.containsMatchIn(lang)) anyPt = true
+                if (br.containsMatchIn("$lang $title")) { brId = MPVLib.getPropertyInt("track-list/$i/id") ?: -1; break }
+            }
+            if (brId > 0 && anyPt) {
+                MPVLib.setPropertyInt("sid", brId)
+                PlayerLog.add("mpv: legenda PT-BR escolhida (faixa $brId)")
+            }
+        } catch (e: Throwable) {
+            PlayerLog.add("mpv: não consegui escolher a legenda PT-BR ($e)")
         }
     }
 
