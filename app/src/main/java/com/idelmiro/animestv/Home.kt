@@ -38,7 +38,9 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
 
-private const val BG = 0xFF0D0F14.toInt()
+private const val BG = 0xFF2B2B2E.toInt()
+/** Texto escuro sobre o branco do foco. */
+private const val INK = 0xFF16161A.toInt()
 private const val ACCENT = 0xFFF47521.toInt()
 private const val MUTED = 0xFF9AA4B0.toInt()
 
@@ -91,6 +93,7 @@ internal class Ui(private val act: MainActivity) {
         textSize = sp(if (primary) 17f else 18f)
         typeface = Typeface.DEFAULT_BOLD
         stateListAnimator = null
+        defaultFocusHighlightEnabled = false
         minWidth = 0; minHeight = 0; minimumWidth = 0; minimumHeight = 0
         val h = dp(46)
         setPadding(if (primary) dp(24) else 0, 0, if (primary) dp(24) else 0, 0)
@@ -99,7 +102,7 @@ internal class Ui(private val act: MainActivity) {
             addState(intArrayOf(), GradientDrawable().apply { cornerRadius = h / 2f; setColor(if (primary) 0xE6FFFFFF.toInt() else 0x33FFFFFF) })
         }
         setTextColor(ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()),
-            intArrayOf(BG, if (primary) BG else Color.WHITE)))
+            intArrayOf(INK, if (primary) INK else Color.WHITE)))
         layoutParams = LinearLayout.LayoutParams(if (primary) ViewGroup.LayoutParams.WRAP_CONTENT else h, h).apply { marginEnd = dp(14) }
         isFocusable = true
         growOnFocus(this, 1.06f)
@@ -181,10 +184,10 @@ internal class HomeView(private val act: MainActivity) {
     private fun buildHero() {
         hero.addView(heroImg, FrameLayout.LayoutParams(-1, -1))
         hero.addView(View(act).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xF50D0F14.toInt(), 0xB30D0F14.toInt(), 0x000D0F14))
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xF52B2B2E.toInt(), 0xB32B2B2E.toInt(), 0x002B2B2E))
         }, FrameLayout.LayoutParams((act.resources.displayMetrics.widthPixels * 0.66f).toInt(), -1))
         hero.addView(View(act).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(BG, 0x000D0F14))
+            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(BG, 0x002B2B2E))
         }, FrameLayout.LayoutParams(-1, (heroH * 0.5f).toInt(), Gravity.BOTTOM))
 
         val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
@@ -373,7 +376,7 @@ internal class HomeView(private val act: MainActivity) {
             val d = monday.plusDays(i.toLong())
             val day = list.filter { act.dayOf(it) == d }.sortedBy { if (it.anime.id in favs) 0 else 1 }
             val nFav = day.count { it.anime.id in favs }
-            val info = "${day.size} episódio(s)" + if (nFav > 0) " · $nFav favorito(s)" else ""
+            val info = "${day.size} episódios" + if (nFav > 0) " · $nFav ♥" else ""
             dayTile(if (d == today) "Hoje" else names[i], "%02d/%02d".format(d.dayOfMonth, d.monthValue), info,
                 day.mapNotNull { it.anime.cover }.distinct().take(4), d == today) { act.openWeekDay(d) }
         })
@@ -421,7 +424,7 @@ internal class HomeView(private val act: MainActivity) {
 
     private fun cardBase(w: Int, h: Int, r: Float, onClick: () -> Unit): FrameLayout = FrameLayout(act).apply {
         layoutParams = LinearLayout.LayoutParams(w, h).apply { marginEnd = ui.dp(18) }
-        background = ui.round(r, 0xFF22262E.toInt())
+        background = ui.round(r, 0xFF3A3A3D.toInt())
         foreground = ui.focusRing(r)
         isFocusable = true; isClickable = true
         ui.clip(this, r)
@@ -469,7 +472,8 @@ internal class HomeView(private val act: MainActivity) {
 
     /** Capa em pé, com o nome embaixo: Favoritos e Top 10 (com o número grande). */
     private fun poster(img: String?, title: String, sub: String, tag: String?, rank: Int?, onClick: () -> Unit): View {
-        val w = ui.dp(136); val h = ui.dp(194)
+        // 6 capas ocupam a mesma largura que 4 cartões de "Continuar assistindo".
+        val w = POSTER_W; val h = (POSTER_W * 1.43f).toInt()
         val box = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(w, -2).apply { marginEnd = ui.dp(18) }
@@ -494,22 +498,27 @@ internal class HomeView(private val act: MainActivity) {
     }
 
     /** Dia da semana com uma colagem das capas dos animes do dia. */
+    private val POSTER_W = (ui.dp(232) * 4 + ui.dp(18) * 3 - ui.dp(18) * 5) / 6
+
     private fun dayTile(name: String, date: String, info: String, covers: List<String>, today: Boolean, onClick: () -> Unit): View {
-        val w = ui.dp(150); val h = ui.dp(226)
+        val w = POSTER_W; val h = (POSTER_W * 1.7f).toInt()
         val card = cardBase(w, h, 14f, onClick)
         card.background = ui.round(14f, if (today) 0xFF2A2F52.toInt() else 0xFF1A2140.toInt())
-        val spots = listOf(intArrayOf(10, 10, 54, 74), intArrayOf(76, 16, 54, 74), intArrayOf(8, 74, 60, 82), intArrayOf(80, 84, 50, 68))
+        // Colagem das capas na metade de cima; o nome do dia fica livre embaixo.
+        val cw = (w * 0.38f).toInt(); val ch = (cw * 1.4f).toInt()
+        val spots = listOf(intArrayOf((w * 0.08f).toInt(), (w * 0.07f).toInt()), intArrayOf((w * 0.52f).toInt(), (w * 0.11f).toInt()),
+            intArrayOf((w * 0.14f).toInt(), (w * 0.42f).toInt()), intArrayOf((w * 0.56f).toInt(), (w * 0.48f).toInt()))
         covers.forEachIndexed { k, url ->
             val s = spots[k]
             val img = image(url).apply { elevation = ui.dp(4).toFloat() }
             ui.clip(img, 6f)
-            card.addView(img, FrameLayout.LayoutParams(ui.dp(s[2]), ui.dp(s[3])).apply { leftMargin = ui.dp(s[0]); topMargin = ui.dp(s[1]) })
+            card.addView(img, FrameLayout.LayoutParams(cw, ch).apply { leftMargin = s[0]; topMargin = s[1] })
         }
         val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dp(12), 0, ui.dp(10), ui.dp(12)) }
         if (today) col.addView(badge("HOJE", ACCENT, 0xFF1A0E05.toInt()), lp())
         col.addView(ui.text(21f, Color.WHITE, true).apply { text = name }, lp(top = 4))
         col.addView(ui.text(14f, 0xD9FFFFFF.toInt(), true).apply { text = date }, lp(top = 2))
-        col.addView(ui.text(11f, 0xFFB9C2CC.toInt(), false, 2).apply { text = info }, lp(top = 4))
+        col.addView(ui.text(11f, 0xFFB9C2CC.toInt(), false, 1).apply { text = info }, lp(top = 4))
         card.addView(col, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         if (today) card.foreground = StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { cornerRadius = ui.dp(14).toFloat(); setStroke(ui.dp(3), Color.WHITE) })
@@ -546,7 +555,7 @@ internal class SideMenu(private val act: MainActivity) {
     init {
         val panel = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
-            background = ui.round(26f, 0xF02E323A.toInt())
+            background = ui.round(26f, 0xF24A4A4F.toInt())
             setPadding(ui.dp(12), ui.dp(20), ui.dp(12), ui.dp(16))
             elevation = ui.dp(16).toFloat()
             isClickable = true
@@ -565,7 +574,7 @@ internal class SideMenu(private val act: MainActivity) {
     }
 
     private fun add(panel: LinearLayout, label: String, icon: Int, screen: MainActivity.Screen?, action: () -> Unit) {
-        val colors = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()), intArrayOf(BG, Color.WHITE))
+        val colors = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()), intArrayOf(INK, Color.WHITE))
         val row = LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -588,11 +597,20 @@ internal class SideMenu(private val act: MainActivity) {
             isDuplicateParentStateEnabled = true
         }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = ui.dp(16) })
         panel.addView(row, LinearLayout.LayoutParams(-1, ui.dp(46)).apply { topMargin = ui.dp(4) })
+        // ◀ ▶ não saem do menu; ▼ no último e ▲ no primeiro ficam onde estão.
+        row.id = View.generateViewId()
+        row.nextFocusLeftId = row.id
+        row.nextFocusRightId = row.id
+        items.lastOrNull()?.second?.let { prev -> prev.nextFocusDownId = row.id; row.nextFocusUpId = prev.id }
+        row.nextFocusDownId = row.id
+        if (items.isEmpty()) row.nextFocusUpId = row.id
         items += screen to row
     }
 
     fun show(current: MainActivity.Screen) {
         clock.text = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+        // Enquanto o menu está aberto, nada atrás dele recebe o foco.
+        act.blockBackground(true)
         view.visibility = View.VISIBLE
         view.bringToFront()
         (items.firstOrNull { it.first == current }?.second ?: items[1].second).requestFocus()
@@ -600,6 +618,7 @@ internal class SideMenu(private val act: MainActivity) {
 
     fun hide() {
         view.visibility = View.GONE
+        act.blockBackground(false)
         act.restoreFocus()
     }
 }
@@ -641,7 +660,7 @@ internal class SearchView(private val act: MainActivity) {
         top.addView(field, LinearLayout.LayoutParams(0, ui.dp(52), 1f))
         view.addView(top)
         view.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(14); bottomMargin = ui.dp(6) })
-        val cols = if (Device.isTv(act)) 7 else 3
+        val cols = if (Device.isTv(act)) 6 else 3
         val d = act.resources.displayMetrics.density
         adapter.posterHeight = (((act.resources.configuration.screenWidthDp - 80) * d / cols - 18 * d) * 1.42f).toInt()
         val grid = RecyclerView(act).apply {

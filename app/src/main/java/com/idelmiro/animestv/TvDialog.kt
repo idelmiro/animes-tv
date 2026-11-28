@@ -57,7 +57,7 @@ class TvDialog(private val act: Activity) {
         d.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val panel = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply { cornerRadius = dp(24).toFloat(); setColor(0xF51E222B.toInt()) }
+            background = GradientDrawable().apply { cornerRadius = dp(24).toFloat(); setColor(0xF5404044.toInt()) }
             setPadding(dp(14), dp(22), dp(14), dp(16))
         }
         val screenH = act.resources.displayMetrics.heightPixels
@@ -129,12 +129,13 @@ class TvDialog(private val act: Activity) {
     }
 
     private val textColors = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()),
-        intArrayOf(0xFF0D0F14.toInt(), Color.WHITE))
+        intArrayOf(0xFF16161A.toInt(), Color.WHITE))
 
     private fun rowView(label: CharSequence) = TextView(act).apply {
         text = label
         textSize = 17f
         setTextColor(textColors)
+        defaultFocusHighlightEnabled = false
         isFocusable = true; isClickable = true
         setPadding(dp(14), dp(11), dp(14), dp(11))
         background = StateListDrawable().apply {
@@ -163,6 +164,8 @@ class TvDialog(private val act: Activity) {
             addState(intArrayOf(), GradientDrawable().apply { cornerRadius = h / 2f; setColor(if (primary) 0x40FFFFFF else 0x22FFFFFF) })
         }
         setTextColor(textColors)
+        // Sem o véu branco que a TV põe por cima do foco (deixava o texto apagado).
+        defaultFocusHighlightEnabled = false
         layoutParams = LinearLayout.LayoutParams(-2, h).apply { marginEnd = dp(10) }
     }
 }
