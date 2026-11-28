@@ -11,6 +11,7 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
+import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -41,36 +42,36 @@ import java.time.temporal.TemporalAdjusters
 
 class MainActivity : Activity() {
 
-    private val scope = MainScope()
-    private lateinit var prefs: Prefs
-    private lateinit var daysRow: LinearLayout
-    private lateinit var status: TextView
-    private lateinit var weekLabel: TextView
-    private lateinit var btnFav: Button
-    private lateinit var adapter: AnimeAdapter
+    internal val scope = MainScope()
+    internal lateinit var prefs: Prefs
+    internal lateinit var daysRow: LinearLayout
+    internal lateinit var status: TextView
+    internal lateinit var weekLabel: TextView
+    internal lateinit var btnFav: Button
+    internal lateinit var adapter: AnimeAdapter
 
-    private val zone: ZoneId = ZoneId.systemDefault()
-    private var monday: LocalDate = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-    private var selected: LocalDate = LocalDate.now()
-    private val cache = HashMap<LocalDate, List<Airing>>()
-    private var loading: Job? = null
-    private var loadError: String? = null
-    private val ui = Handler(Looper.getMainLooper())
+    internal val zone: ZoneId = ZoneId.systemDefault()
+    internal var monday: LocalDate = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+    internal var selected: LocalDate = LocalDate.now()
+    internal val cache = HashMap<LocalDate, List<Airing>>()
+    internal var loading: Job? = null
+    internal var loadError: String? = null
+    internal val ui = Handler(Looper.getMainLooper())
     /** Janela "Abrindo no Amnis…" e o aviso de demora, enquanto o Amnis não assume a tela. */
-    private var launchWatch: Pair<AlertDialog, Runnable>? = null
+    internal var launchWatch: Pair<AlertDialog, Runnable>? = null
 
     // Teste guiado de formas de abrir o Crunchyroll. Fica salvo nas preferências porque
     // o Android pode fechar este app enquanto o Crunchyroll toca o vídeo.
-    private class TestRun(val kind: String, val variants: List<CrunchyrollLauncher.Variant>, val question: String)
+    internal class TestRun(val kind: String, val variants: List<CrunchyrollLauncher.Variant>, val question: String)
 
-    private var isPhone = false
+    internal var isPhone = false
 
     /**
      * Celular: menos margem, cabeçalho em duas linhas na vertical (botões roláveis para o
      * lado), número de colunas pela largura da tela e cards que não "vazam" por cima dos
      * dias ao rolar a lista.
      */
-    private fun adaptForPhone(grid: RecyclerView) {
+    internal fun adaptForPhone(grid: RecyclerView) {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         val root = findViewById<LinearLayout>(R.id.root)
@@ -93,13 +94,25 @@ class MainActivity : Activity() {
         adapter.posterHeight = (colPx * 1.42f).toInt()
     }
 
-    private val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
-    private val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
+    internal val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
+    internal val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         prefs = Prefs(this)
+        // Tela inicial, busca e menu lateral ficam por cima da semana/temporadas.
+        val oldRoot = findViewById<View>(R.id.root)
+        (oldRoot.parent as ViewGroup).removeView(oldRoot)
+        home = HomeView(this)
+        searchView = SearchView(this)
+        sideMenu = SideMenu(this)
+        val frame = android.widget.FrameLayout(this)
+        frame.addView(oldRoot, android.widget.FrameLayout.LayoutParams(-1, -1))
+        frame.addView(home.view, android.widget.FrameLayout.LayoutParams(-1, -1))
+        frame.addView(searchView.view, android.widget.FrameLayout.LayoutParams(-1, -1))
+        frame.addView(sideMenu.view, android.widget.FrameLayout.LayoutParams(-1, -1))
+        setContentView(frame)
 
         daysRow = findViewById(R.id.days)
         status = findViewById(R.id.status)
@@ -113,6 +126,7 @@ class MainActivity : Activity() {
         isPhone = !Device.isTv(this)
         if (isPhone) adaptForPhone(grid)
 
+        findViewById<Button>(R.id.btnMenu).setOnClickListener { openMenu() }
         findViewById<Button>(R.id.btnPrev).setOnClickListener { changeWeek(-1) }
         findViewById<Button>(R.id.btnNext).setOnClickListener { changeWeek(1) }
         findViewById<Button>(R.id.btnMode).setOnClickListener { toggleMode() }
@@ -132,7 +146,8 @@ class MainActivity : Activity() {
         }
 
         updateFavButton()
-        load()
+        showScreen(Screen.HOME)
+        home.start()
         PlayerLog.crashed(this)?.let { log ->
             // Fechou depois de o vídeo começar a ser lido (evento 8 = arquivo carregado):
             // provável problema de decodificação na TV. Na próxima vez, usa um modo mais compatível.
@@ -149,6 +164,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (screen == Screen.HOME) home.refreshLocal()
         // Episódios que terminaram de baixar na memória interna vão para o pendrive/HD.
         Downloads.finishMoves(applicationContext)
         val saved = prefs.pendingTest ?: return
@@ -166,7 +182,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun askTestResult(t: TestRun, idx: Int) {
+    internal fun askTestResult(t: TestRun, idx: Int) {
         val v = t.variants.getOrNull(idx) ?: return
         val hasNext = idx + 1 < t.variants.size
         val b = dialog().setTitle("Teste ${idx + 1} de ${t.variants.size}")
@@ -188,7 +204,7 @@ class MainActivity : Activity() {
         b.setNeutralButton("Parar", null).show()
     }
 
-    private fun runTest(t: TestRun, index: Int) {
+    internal fun runTest(t: TestRun, index: Int) {
         if (t.variants.isEmpty()) {
             toast("Não encontrei o app do Crunchyroll.")
             return
@@ -209,7 +225,7 @@ class MainActivity : Activity() {
     }
 
     /** Busca o código do episódio no Crunchyroll e chama [then] com ele. */
-    private fun withEpisode(a: Airing, then: (CrunchyrollApi.Episode) -> Unit) {
+    internal fun withEpisode(a: Airing, then: (CrunchyrollApi.Episode) -> Unit) {
         val sid = CrunchyrollApi.seriesIdFromUrl(a.anime.crunchyrollUrl)
         if (sid == null) {
             toast("Este anime não tem link do Crunchyroll.")
@@ -231,13 +247,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun watchEpisode(a: Airing) {
+    internal fun watchEpisode(a: Airing) {
         withEpisode(a) { ep ->
             CrunchyrollLauncher.openEpisode(this, ep.id, ep.slug, a.anime.crunchyrollUrl)?.let { toast(it) }
         }
     }
 
-    private fun testEpisode(a: Airing) {
+    internal fun testEpisode(a: Airing) {
         withEpisode(a) { ep ->
             val t = TestRun(
                 "ep",
@@ -248,7 +264,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun testSeries(a: Airing) {
+    internal fun testSeries(a: Airing) {
         val url = a.anime.crunchyrollUrl
         if (url == null) {
             toast("Este anime não tem link do Crunchyroll. Teste com outro.")
@@ -274,20 +290,21 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         launchWatch?.let { ui.removeCallbacks(it.second) }
+        if (::home.isInitialized) home.stop()
         scope.cancel()
         super.onDestroy()
     }
 
     // ---------- semana e carregamento ----------
 
-    private fun changeWeek(delta: Long) {
+    internal fun changeWeek(delta: Long) {
         val dayIndex = selected.dayOfWeek.value - 1L
         monday = monday.plusWeeks(delta)
         selected = monday.plusDays(dayIndex)
         load()
     }
 
-    private fun load() {
+    internal fun load() {
         if (seasonMode) {
             buildSeasonTabs()
             loadSeason()
@@ -336,15 +353,15 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun weekList(): List<Airing> =
+    internal fun weekList(): List<Airing> =
         (cache[monday] ?: emptyList()).filter { !prefs.onlyCrunchyroll || it.anime.crunchyrollUrl != null }
 
-    private fun dayOf(a: Airing): LocalDate =
+    internal fun dayOf(a: Airing): LocalDate =
         Instant.ofEpochMilli(a.releaseMillis(prefs.offsetMinutes)).atZone(zone).toLocalDate()
 
     // ---------- dias ----------
 
-    private fun buildDays() {
+    internal fun buildDays() {
         daysRow.removeAllViews()
         val inflater = LayoutInflater.from(this)
         for (i in 0 until 7) {
@@ -368,7 +385,7 @@ class MainActivity : Activity() {
         if (idx in 0..6) daysRow.getChildAt(idx).post { daysRow.getChildAt(idx)?.requestFocus() }
     }
 
-    private fun updateDays() {
+    internal fun updateDays() {
         if (seasonMode) {
             updateSeasonTabs()
             return
@@ -391,7 +408,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun selectDay(d: LocalDate) {
+    internal fun selectDay(d: LocalDate) {
         selected = d
         updateDays()
         showDay()
@@ -399,7 +416,7 @@ class MainActivity : Activity() {
 
     // ---------- grade ----------
 
-    private fun showDay() {
+    internal fun showDay() {
         if (seasonMode) {
             showSeason()
             return
@@ -420,14 +437,120 @@ class MainActivity : Activity() {
 
     // ---------- temporadas (as 4 últimas) ----------
 
-    private var seasonMode = false
-    private val seasonCache = HashMap<AniList.Season, List<Airing>>()
-    private var selectedSeason = 0
-    private var seasons: List<AniList.Season> = emptyList()
+    internal var seasonMode = false
+    internal val seasonCache = HashMap<AniList.Season, List<Airing>>()
+    internal var selectedSeason = 0
+    internal var seasons: List<AniList.Season> = emptyList()
 
     /** Troca entre a semana (calendário) e as últimas 4 temporadas. */
-    private fun toggleMode() {
-        seasonMode = !seasonMode
+    internal fun toggleMode() {
+        if (!seasonMode) selectedSeason = 0
+        screen = if (seasonMode) Screen.WEEK else Screen.SEASONS
+        applySeasonMode(!seasonMode)
+    }
+
+    // ---------- telas: início, semana, temporadas, busca ----------
+
+    enum class Screen { HOME, WEEK, SEASONS, SEARCH }
+
+    internal var screen = Screen.HOME
+    internal lateinit var home: HomeView
+    internal lateinit var sideMenu: SideMenu
+    internal lateinit var searchView: SearchView
+    private var lastFocus: View? = null
+
+    internal fun showScreen(s: Screen) {
+        screen = s
+        home.view.visibility = if (s == Screen.HOME) View.VISIBLE else View.GONE
+        searchView.view.visibility = if (s == Screen.SEARCH) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.root).visibility = if (s == Screen.WEEK || s == Screen.SEASONS) View.VISIBLE else View.GONE
+        when (s) {
+            Screen.HOME -> { home.refreshLocal(); home.focusStart() }
+            Screen.SEARCH -> searchView.focus()
+            Screen.WEEK -> applySeasonMode(false)
+            Screen.SEASONS -> applySeasonMode(true)
+        }
+    }
+
+    /** Abre a semana no dia [d]. */
+    internal fun openWeekDay(d: LocalDate) {
+        monday = d.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        selected = d
+        showScreen(Screen.WEEK)
+    }
+
+    /** Abre as temporadas na aba [i] (0 = a atual). */
+    internal fun openSeasonTab(i: Int) {
+        selectedSeason = i
+        showScreen(Screen.SEASONS)
+    }
+
+    internal fun openMenu() {
+        lastFocus = currentFocus
+        sideMenu.show(screen)
+    }
+
+    internal fun restoreFocus() {
+        val f = lastFocus
+        lastFocus = null
+        if (f != null && f.isShown) f.requestFocus()
+        else if (screen == Screen.HOME) home.focusStart()
+    }
+
+    /** Anime da tela inicial ou da busca: episódios se já estreou, trailer se ainda não. */
+    internal fun openShow(s: AniList.Show) {
+        if (s.aired <= 0) playTrailer(s.anime) else onSeasonAnimeClick(s.toAiring())
+    }
+
+    /** Trailer do YouTube indicado no AniList; sem ele, oferece procurar no YouTube. */
+    internal fun playTrailer(a: Anime) {
+        val id = a.trailer
+        if (id != null) {
+            startActivity(Intent(this, TrailerActivity::class.java)
+                .putExtra(TrailerActivity.EXTRA_ID, id).putExtra(TrailerActivity.EXTRA_TITLE, a.title))
+            return
+        }
+        val fav = prefs.isFav(a.id)
+        dialog().setTitle(a.title)
+            .setMessage("Ainda não estreou e o AniList não tem trailer deste anime.")
+            .setPositiveButton("Procurar no YouTube") { _, _ ->
+                openUrl("https://www.youtube.com/results?search_query=" + android.net.Uri.encode("${a.title} trailer"))
+            }
+            .setNeutralButton(if (fav) "Remover dos favoritos" else "Favoritar") { _, _ ->
+                prefs.toggleFav(a.id)
+                home.refreshLocal()
+                HomeWorker.runNow(this)
+            }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (::home.isInitialized) home.onKey()
+        val down = event.action == KeyEvent.ACTION_DOWN
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_BACK -> if (::sideMenu.isInitialized && (sideMenu.isOpen || screen != Screen.HOME)) {
+                if (!down) { if (sideMenu.isOpen) sideMenu.hide() else showScreen(Screen.HOME) }
+                return true
+            }
+            KeyEvent.KEYCODE_MENU -> {
+                if (!down) { if (sideMenu.isOpen) sideMenu.hide() else openMenu() }
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> if (down && !sideMenu.isOpen && screen != Screen.SEARCH) {
+                // ◀ na borda esquerda abre o menu (como na Apple TV).
+                val f = currentFocus
+                if (f != null && f.focusSearch(View.FOCUS_LEFT) == null) {
+                    openMenu()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    internal fun applySeasonMode(on: Boolean) {
+        seasonMode = on
         findViewById<Button>(R.id.btnMode).text = if (seasonMode) "Semana" else "Temporadas"
         findViewById<TextView>(R.id.titleText).text = if (seasonMode) "Animes das temporadas" else "Animes da semana"
         val vis = if (seasonMode) View.GONE else View.VISIBLE
@@ -435,11 +558,10 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.btnNext).visibility = vis
         weekLabel.visibility = vis
         loading?.cancel()
-        if (seasonMode) selectedSeason = 0
         load()
     }
 
-    private fun buildSeasonTabs() {
+    internal fun buildSeasonTabs() {
         // Sempre as 4 últimas, a partir de hoje (em jan/2027: inverno 2027 e as 3 últimas de 2026).
         seasons = AniList.lastSeasons(LocalDate.now(), 4)
         if (selectedSeason !in seasons.indices) selectedSeason = 0
@@ -456,7 +578,7 @@ class MainActivity : Activity() {
         daysRow.getChildAt(selectedSeason)?.let { v -> v.post { v.requestFocus() } }
     }
 
-    private fun updateSeasonTabs() {
+    internal fun updateSeasonTabs() {
         val favs = prefs.favorites
         for (i in 0 until minOf(daysRow.childCount, seasons.size)) {
             val s = seasons[i]
@@ -472,13 +594,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun selectSeason(i: Int) {
+    internal fun selectSeason(i: Int) {
         selectedSeason = i
         updateSeasonTabs()
         loadSeason()
     }
 
-    private fun loadSeason() {
+    internal fun loadSeason() {
         val s = seasons.getOrNull(selectedSeason) ?: return
         if (seasonCache[s] != null) {
             showSeason()
@@ -503,7 +625,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showSeason() {
+    internal fun showSeason() {
         val s = seasons.getOrNull(selectedSeason) ?: return
         val all = seasonCache[s] ?: return
         val favs = prefs.favorites
@@ -520,9 +642,9 @@ class MainActivity : Activity() {
     }
 
     /** Anime na tela de temporadas: Crunchyroll abre a página da série; os outros, os episódios. */
-    private fun onSeasonAnimeClick(a: Airing) {
+    internal fun onSeasonAnimeClick(a: Airing) {
         if (a.episode <= 0) {
-            toast("${a.anime.title} ainda não estreou.")
+            playTrailer(a.anime)
             return
         }
         val cr = a.anime.crunchyrollUrl
@@ -541,16 +663,16 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun setStatus(text: String?) {
+    internal fun setStatus(text: String?) {
         status.text = text ?: ""
         status.visibility = if (text.isNullOrEmpty()) View.GONE else View.VISIBLE
     }
 
-    private fun updateFavButton() {
+    internal fun updateFavButton() {
         btnFav.text = if (prefs.onlyFavorites) "♥ Só favoritos" else "♡ Todos"
     }
 
-    private fun onAnimeClick(a: Airing) {
+    internal fun onAnimeClick(a: Airing) {
         if (a.anime.crunchyrollUrl == null || prefs.crViaNyaa) {
             onOtherServiceClick(a)
             return
@@ -575,8 +697,9 @@ class MainActivity : Activity() {
             }.show()
     }
 
-    private fun toggleFav(a: Airing) {
+    internal fun toggleFav(a: Airing) {
         prefs.toggleFav(a.anime.id)
+        if (::home.isInitialized) home.refreshLocal()
         updateDays()
         if (prefs.onlyFavorites) showDay() else adapter.notifyDataSetChanged()
         HomeWorker.runNow(this)
@@ -584,7 +707,7 @@ class MainActivity : Activity() {
 
     // ---------- animes fora do Crunchyroll: Nyaa + Amnis ----------
 
-    private fun onOtherServiceClick(a: Airing) {
+    internal fun onOtherServiceClick(a: Airing) {
         val fav = prefs.isFav(a.anime.id)
         val actions = ArrayList<Pair<String, () -> Unit>>()
         val sv = Downloads.savedFor(this, a.anime.id, a.episode)
@@ -607,14 +730,14 @@ class MainActivity : Activity() {
     }
 
     /** Temporada anterior de cada anime já consultada no AniList (null = não tem). */
-    private val prequels = HashMap<Int, AniList.Prequel?>()
+    internal val prequels = HashMap<Int, AniList.Prequel?>()
 
     /**
      * Segunda janela: lista os episódios anteriores (do mais recente para o primeiro) e, no
      * fim, a temporada anterior, se houver. [wholeSeason] = é uma temporada anterior inteira
      * ([a].episode é o último episódio dela); [back] = para onde o Voltar leva.
      */
-    private fun chooseEarlierEpisode(a: Airing, wholeSeason: Boolean = false, back: (() -> Unit)? = null) {
+    internal fun chooseEarlierEpisode(a: Airing, wholeSeason: Boolean = false, back: (() -> Unit)? = null) {
         val id = a.anime.id
         val cached = prequels.containsKey(id)
         if (!cached) {
@@ -632,7 +755,7 @@ class MainActivity : Activity() {
         } else showEarlier(a, wholeSeason, back, prequels[id])
     }
 
-    private fun showEarlier(a: Airing, wholeSeason: Boolean, back: (() -> Unit)?, pre: AniList.Prequel?) {
+    internal fun showEarlier(a: Airing, wholeSeason: Boolean, back: (() -> Unit)?, pre: AniList.Prequel?) {
         val last = if (wholeSeason) a.episode else a.episode - 1
         val eps = if (last < 1) emptyList() else (last downTo maxOf(1, last - 99)).toList()
         val goBack = back ?: { onOtherServiceClick(a) }
@@ -664,7 +787,7 @@ class MainActivity : Activity() {
     }
 
     /** A temporada anterior de uma "Season N" é a N-1 (ajuda a não pegar episódios da temporada errada). */
-    private fun prequelWithSeason(current: Anime, prequel: Anime): Anime {
+    internal fun prequelWithSeason(current: Anime, prequel: Anime): Anime {
         val s = current.seasonHint ?: Nyaa.seasonFromNames(listOf(current.title) + current.altTitles) ?: return prequel
         if (Nyaa.seasonFromNames(listOf(prequel.title) + prequel.altTitles) != null || s < 2) return prequel
         return prequel.copy(seasonHint = s - 1)
@@ -673,7 +796,7 @@ class MainActivity : Activity() {
     // ---------- baixados ----------
 
     /** Tudo o que está baixado ou em andamento, do usado mais recentemente para o mais antigo. */
-    private fun showSaved() {
+    internal fun showSaved() {
         val list = Downloads.saved(this).sortedByDescending { it.lastActivity }
         if (list.isEmpty()) {
             dialog().setTitle("Baixados")
@@ -696,7 +819,7 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun savedActions(sv: Downloads.Saved) {
+    internal fun savedActions(sv: Downloads.Saved) {
         val name = sv.title.ifBlank { sv.release }
         val actions = ArrayList<Pair<String, () -> Unit>>()
         if (sv.complete) {
@@ -727,9 +850,9 @@ class MainActivity : Activity() {
     }
 
     /** Janela com indicador girando e um texto que é atualizado com a etapa real. */
-    private class Progress(val dialog: AlertDialog, val text: TextView)
+    internal class Progress(val dialog: AlertDialog, val text: TextView)
 
-    private fun progressDialog(title: String, message: String, onCancel: (() -> Unit)?): Progress {
+    internal fun progressDialog(title: String, message: String, onCancel: (() -> Unit)?): Progress {
         val pad = (24 * resources.displayMetrics.density).toInt()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -751,7 +874,7 @@ class MainActivity : Activity() {
     }
 
     /** Antes de buscar no Nyaa, vê se o episódio já está baixado (ou em andamento) e oferece continuar. */
-    private fun searchNyaa(a: Airing, episode: Int) {
+    internal fun searchNyaa(a: Airing, episode: Int) {
         val saved = Downloads.savedFor(this, a.anime.id, episode)
         if (saved.isEmpty() || prefs.useAmnis) {
             searchNyaaNow(a, episode)
@@ -782,13 +905,13 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun clock(s: Long) = if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+    internal fun clock(s: Long) = if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
         else String.format("%d:%02d", s / 60, s % 60)
 
-    private fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved, start: Long) =
+    internal fun playSaved(a: Airing, episode: Int, sv: Downloads.Saved, start: Long) =
         playSaved(a.anime.title, a.anime.id, episode, sv, start)
 
-    private fun playSaved(title: String, animeId: Int, episode: Int, sv: Downloads.Saved, start: Long) {
+    internal fun playSaved(title: String, animeId: Int, episode: Int, sv: Downloads.Saved, start: Long) {
         startActivity(Intent(this, PlayerActivity::class.java)
             .putExtra(PlayerActivity.EXTRA_LOCAL_FILE, sv.video!!.absolutePath)
             .putExtra(PlayerActivity.EXTRA_DIR, sv.dir.absolutePath)
@@ -800,10 +923,10 @@ class MainActivity : Activity() {
     }
 
     /** Download que ficou pela metade: retoma o torrent aproveitando o que já foi baixado. */
-    private fun resumeDownload(a: Airing, episode: Int, sv: Downloads.Saved) =
+    internal fun resumeDownload(a: Airing, episode: Int, sv: Downloads.Saved) =
         resumeDownload(a.anime.title, a.anime.id, episode, sv)
 
-    private fun resumeDownload(title: String, animeId: Int, episode: Int, sv: Downloads.Saved) {
+    internal fun resumeDownload(title: String, animeId: Int, episode: Int, sv: Downloads.Saved) {
         startActivity(Intent(this, PlayerActivity::class.java)
             .putExtra(PlayerActivity.EXTRA_MAGNET, sv.magnet)
             .putExtra(PlayerActivity.EXTRA_TITLE, title)
@@ -814,7 +937,7 @@ class MainActivity : Activity() {
             .putExtra(PlayerActivity.EXTRA_START, if (sv.pos > 30) sv.pos else 0L))
     }
 
-    private fun searchNyaaNow(a: Airing, episode: Int, lang: Nyaa.Lang = Nyaa.Lang.PTBR) {
+    internal fun searchNyaaNow(a: Airing, episode: Int, lang: Nyaa.Lang = Nyaa.Lang.PTBR) {
         var job: Job? = null
         val dubbed = lang == Nyaa.Lang.EN_DUB
         val heading = "${a.anime.title} — Ep. $episode" + if (dubbed) " (dublado em inglês)" else ""
@@ -881,7 +1004,7 @@ class MainActivity : Activity() {
     }
 
     /** Legenda de Portugal (ou sem dizer qual): avisa a diferença antes de assistir. */
-    private fun confirmPortugal(r: Nyaa.Result, go: () -> Unit) {
+    internal fun confirmPortugal(r: Nyaa.Result, go: () -> Unit) {
         val unknown = !r.note.contains("Portugal")
         val first = if (unknown)
             "Este lançamento tem legenda em português, mas não diz se é do Brasil ou de Portugal. Pode ser de Portugal."
@@ -897,7 +1020,7 @@ class MainActivity : Activity() {
     }
 
     /** Tamanho do Nyaa ("1.4 GiB", "650.2 MiB") passa do limite de downloads? */
-    private fun tooBig(size: String): Boolean {
+    internal fun tooBig(size: String): Boolean {
         val m = Regex("""([\d.]+)\s*GiB""").find(size) ?: return false
         return (m.groupValues[1].toDoubleOrNull() ?: 0.0) * 1073741824.0 > Downloads.cap(this)
     }
@@ -907,7 +1030,7 @@ class MainActivity : Activity() {
      * Amnis assume a tela (o Android pausa este app). Se isso não acontecer em alguns
      * segundos, avisa e oferece tentar de novo.
      */
-    private fun openInAmnis(r: Nyaa.Result, episode: Int) {
+    internal fun openInAmnis(r: Nyaa.Result, episode: Int) {
         val hint = if (r.batch) "\n\nÉ um pacote: escolha o episódio $episode na lista do Amnis." else ""
         val prog = progressDialog("Abrindo no Amnis", "Enviando o link para o Amnis…\n${r.title}$hint", null)
         val msg = Amnis.open(this, r.magnet)
@@ -931,7 +1054,7 @@ class MainActivity : Activity() {
         ui.postDelayed(timeout, 10_000)
     }
 
-    private fun openUrl(url: String) {
+    internal fun openUrl(url: String) {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
         } catch (_: Exception) {
@@ -941,7 +1064,7 @@ class MainActivity : Activity() {
 
     // ---------- ajustes ----------
 
-    private fun openSettings() {
+    internal fun openSettings() {
         val options = arrayOf(
             "Atraso do legendado em relação ao Japão: ${prefs.offsetMinutes} min",
             "Mostrar: ${if (prefs.onlyCrunchyroll) "só Crunchyroll" else "todos os serviços"}",
@@ -993,7 +1116,7 @@ class MainActivity : Activity() {
 
     // ---------- downloads: local e limite ----------
 
-    private fun showDownloads() {
+    internal fun showDownloads() {
         val ok = Downloads.available(this)
         val mode = if (!Downloads.usesExternal(this)) "" else if (prefs.downloadDirect)
             "Modo: direto no disco (SSD)\n" else "Modo: memória interna primeiro, depois o disco (HD/pendrive)\n"
@@ -1010,7 +1133,7 @@ class MainActivity : Activity() {
             .setNegativeButton("Fechar", null).show()
     }
 
-    private fun chooseDownloadLocation() {
+    internal fun chooseDownloadLocation() {
         val vols = Downloads.volumes(this)
         val current = prefs.downloadPath
         val labels = vols.map { "${it.name}: ${Downloads.human(it.free)} livres de ${Downloads.human(it.total)}" }.toTypedArray()
@@ -1033,7 +1156,7 @@ class MainActivity : Activity() {
         }.setNegativeButton("Voltar", null).show()
     }
 
-    private fun chooseCap(v: Downloads.Volume) {
+    internal fun chooseCap(v: Downloads.Volume) {
         // Só oferece limites que cabem no espaço livre (somado ao que os downloads já ocupam).
         val room = v.free + Downloads.used(this)
         val options = intArrayOf(1, 2, 3, 5, 10, 15, 20).filter { it * 1073741824L <= room - 200L * 1024 * 1024 }
@@ -1054,7 +1177,7 @@ class MainActivity : Activity() {
     }
 
     /** Disco externo: baixar direto nele (SSD) ou na memória interna primeiro (HD/pendrive). */
-    private fun chooseMode() {
+    internal fun chooseMode() {
         val labels = arrayOf(
             "HD ou pendrive: baixa na memória interna da TV e move para o disco quando termina",
             "SSD: baixa direto no disco (não usa a memória interna)")
@@ -1065,7 +1188,7 @@ class MainActivity : Activity() {
             }.show()
     }
 
-    private fun chooseOffset() {
+    internal fun chooseOffset() {
         val values = intArrayOf(0, 30, 60, 90, 120, 180)
         val labels = values.map { if (it == 0) "Sem atraso" else "$it minutos" }.toTypedArray()
         val current = values.indexOf(prefs.offsetMinutes)
@@ -1078,7 +1201,7 @@ class MainActivity : Activity() {
         }.show()
     }
 
-    private fun showDiagnostics() {
+    internal fun showDiagnostics() {
         val pkgs = CrunchyrollLauncher.installedPackages(this)
         val handlers = CrunchyrollLauncher.handlersFor(this, CrunchyrollLauncher.SAMPLE_URL)
         val text = buildString {
@@ -1111,7 +1234,7 @@ class MainActivity : Activity() {
         b.show()
     }
 
-    private fun videoModeName(m: Int) = when (m) {
+    internal fun videoModeName(m: Int) = when (m) {
         0 -> "hardware (padrão)"
         1 -> "hardware com cópia"
         2 -> "só processador (mais pesado)"
@@ -1119,7 +1242,7 @@ class MainActivity : Activity() {
     }
 
     /** Mostra o registro do player (as últimas linhas, que dizem onde parou). */
-    private fun showPlayerLog(text: String, crashed: Boolean, note: String = "") {
+    internal fun showPlayerLog(text: String, crashed: Boolean, note: String = "") {
         val tail = text.lines().filter { it.isNotBlank() }.takeLast(45).joinToString("\n")
         val intro = if (crashed) "O player fechou inesperadamente na última vez. Últimas etapas registradas:\n\n" else ""
         dialog().setTitle(if (crashed) "O player fechou" else "Registro do player")
@@ -1129,7 +1252,7 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun checkUpdate() {
+    internal fun checkUpdate() {
         toast("Verificando atualização…")
         scope.launch {
             try {
@@ -1150,9 +1273,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+    internal fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
 
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    internal fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }
 
 class AnimeAdapter(
