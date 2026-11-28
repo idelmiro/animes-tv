@@ -130,8 +130,8 @@ class DeepLinkActivity : Activity() {
         val url = data?.getQueryParameter("url")?.takeIf { it.isNotBlank() }
         val ep = data?.getQueryParameter("ep")?.takeIf { it.isNotBlank() }
         val slug = data?.getQueryParameter("slug").orEmpty()
-        if (url == null) {
-            // Anime fora do Crunchyroll: abre o Animes TV (busca no Nyaa fica lá).
+        if (url == null || Prefs(this).crViaNyaa) {
+            // Anime fora do Crunchyroll (ou Crunchyroll indisponível): abre o Animes TV (busca no Nyaa fica lá).
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             finish()
             return

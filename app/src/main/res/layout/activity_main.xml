@@ -70,6 +70,11 @@
             android:text="Atualizar" />
 
         <Button
+            android:id="@+id/btnDownloads"
+            style="@style/TvButton"
+            android:text="Baixados" />
+
+        <Button
             android:id="@+id/btnSettings"
             style="@style/TvButton"
             android:text="Ajustes" />

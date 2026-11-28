@@ -231,6 +231,9 @@ object Downloads {
 
     private fun lastUse(dir: File) = marker(dir).takeIf { it.exists() }?.lastModified() ?: dir.lastModified()
 
+    /** Última vez que o episódio foi baixado ou assistido (o .info muda ao guardar a posição). */
+    fun lastActivity(dir: File) = maxOf(lastUse(dir), info(dir).lastModified())
+
     private fun readInfo(dir: File): org.json.JSONObject? =
         try { org.json.JSONObject(info(dir).readText()) } catch (_: Throwable) { null }
 
@@ -266,7 +269,11 @@ object Downloads {
         /** Porcentagem baixada (só faz sentido se incompleto). */
         val percent: Int,
         /** Versão dublada em inglês (o player escolhe o áudio em inglês). */
-        val dub: Boolean = false
+        val dub: Boolean = false,
+        /** Nome do anime. */
+        val title: String = "",
+        /** Última vez que foi baixado ou assistido (ms). */
+        val lastActivity: Long = 0L
     ) {
         val complete get() = video != null
     }
@@ -285,7 +292,8 @@ object Downloads {
             try {
                 Saved(d, v, o.getInt("animeId"), o.getInt("episode"), o.optString("release", v?.name ?: ""),
                     o.optLong("size", v?.length() ?: 0L), magnet, o.optLong("pos", 0L),
-                    if (v != null) 100 else o.optInt("percent", 0), o.optBoolean("dub", false))
+                    if (v != null) 100 else o.optInt("percent", 0), o.optBoolean("dub", false),
+                    o.optString("title", ""), lastActivity(d))
             } catch (_: Throwable) { null }
         }
     }

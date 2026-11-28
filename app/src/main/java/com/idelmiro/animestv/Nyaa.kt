@@ -146,6 +146,20 @@ object Nyaa {
         return out.distinctBy { it.text.lowercase() }.take(3)
     }
 
+    /** Temporada que o nome indica ("Season 2", "2nd Season", "S2"), ou null. */
+    fun seasonFromNames(names: List<String>): Int? = names.firstNotNullOfOrNull { n ->
+        SEASON_NAME.find(cleanName(n))?.let { m -> (2..4).firstNotNullOfOrNull { m.groupValues[it].toIntOrNull() } }
+    }
+
+    private val STATED_SEASON = Regex(
+        """(?<![a-z0-9])S(\d{1,2})E\d|season\W{0,2}(\d{1,2})(?![0-9])|(?<![0-9])(\d)(?:st|nd|rd|th)\s+season""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Temporada que o título do lançamento diz ser, ou null. */
+    private fun statedSeason(title: String): Int? =
+        STATED_SEASON.find(title)?.let { m -> (1..3).firstNotNullOfOrNull { m.groupValues[it].toIntOrNull() } }
+
     /** O título diz que é desta temporada? ("S02E07", "Season 2", "2nd Season", "(Season 02)") */
     private fun hasSeason(title: String, season: Int): Boolean = Regex(
         """(?<![a-z0-9])S0*$season(?:\s?E\d|(?![0-9]))|season\W{0,2}0*$season(?![0-9])|(?<![0-9])$season(?:st|nd|rd|th)\s+season""",
@@ -156,8 +170,11 @@ object Nyaa {
      * Procura o [episode] do anime pelos [names] (o primeiro é o título principal).
      * Roda em thread de fundo (faz várias consultas de rede).
      */
-    fun search(names: List<String>, episode: Int, lang: Lang = Lang.PTBR, progress: (String) -> Unit = {}): List<Result> {
+    fun search(names: List<String>, episode: Int, lang: Lang = Lang.PTBR, season: Int? = null,
+               progress: (String) -> Unit = {}): List<Result> {
         val queries = queries(names)
+        // Temporada esperada: lançamentos que dizem ser de outra temporada são descartados.
+        val expected = season ?: seasonFromNames(names)
         if (queries.isEmpty()) throw Exception("o anime não tem um nome em letras latinas para buscar")
         val found = LinkedHashMap<String, Result>()
         var lastError: Exception? = null
@@ -197,6 +214,7 @@ object Nyaa {
             /** Episódio certo (e, no nome-base, a temporada certa)? null = não serve. */
             fun episodeOf(it: Item): Boolean? {
                 if (q.season != null && !hasSeason(it.title, q.season)) return null
+                if (expected != null) statedSeason(it.title)?.let { st -> if (st != expected) return null }
                 return matchEpisode(it.title, episode)
             }
             try {
