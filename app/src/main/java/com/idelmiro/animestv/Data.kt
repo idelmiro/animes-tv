@@ -32,7 +32,9 @@ data class Airing(
     val episode: Int,
     val airingAt: Long,
     /** true = anime fora do Crunchyroll, mostrado uma semana depois da exibição real. */
-    val delayed: Boolean = false
+    val delayed: Boolean = false,
+    /** Na tela de temporadas: o selo no lugar do horário (nota ou "Em breve"). */
+    val badge: String? = null
 ) {
     /** Horário estimado em que o episódio legendado sai no Crunchyroll. */
     fun releaseMillis(offsetMinutes: Int): Long = (airingAt + offsetMinutes * 60L) * 1000L
@@ -198,6 +200,81 @@ object AniList {
         val media = o.optJSONObject("media") ?: return null
         val anime = parseMedia(media) ?: return null
         return Airing(anime = anime, episode = o.optInt("episode"), airingAt = o.getLong("airingAt"))
+    }
+
+    /** Temporada de anime (a do Japão): WINTER = jan–mar, SPRING = abr–jun, SUMMER = jul–set, FALL = out–dez. */
+    data class Season(val name: String, val year: Int) {
+        private val idx get() = NAMES.indexOf(name)
+        val label get() = "${listOf("Inverno", "Primavera", "Verão", "Outono")[idx]} $year"
+        val months get() = listOf("jan–mar", "abr–jun", "jul–set", "out–dez")[idx]
+
+        companion object {
+            val NAMES = listOf("WINTER", "SPRING", "SUMMER", "FALL")
+        }
+    }
+
+    /** A temporada de [today] e as anteriores, [n] no total (da mais nova para a mais antiga). */
+    fun lastSeasons(today: java.time.LocalDate, n: Int): List<Season> {
+        var i = (today.monthValue - 1) / 3
+        var y = today.year
+        return List(n) {
+            Season(Season.NAMES[i], y).also { if (--i < 0) { i = 3; y-- } }
+        }
+    }
+
+    private val SEASON_QUERY = """
+        query (#page: Int, #season: MediaSeason, #year: Int) {
+          Page(page: #page, perPage: 50) {
+            pageInfo { hasNextPage }
+            media(season: #season, seasonYear: #year, type: ANIME, isAdult: false,
+                  format_in: [TV, TV_SHORT, ONA], sort: POPULARITY_DESC) {
+              id isAdult episodes status averageScore
+              nextAiringEpisode { episode }
+              title { romaji english }
+              synonyms
+              coverImage { large }
+              bannerImage
+              externalLinks { site url type }
+            }
+          }
+        }
+    """.trimIndent().replace('#', '$')
+
+    /**
+     * Animes de uma temporada, do mais popular para o menos. Cada um vem como um [Airing] em
+     * que episode = quantos episódios já saíram (0 = ainda não estreou).
+     */
+    fun fetchSeason(s: Season): List<Airing> {
+        val out = ArrayList<Airing>()
+        var page = 1
+        while (page <= 4) {
+            val vars = JSONObject().put("page", page).put("season", s.name).put("year", s.year)
+            val json = post(JSONObject().put("query", SEASON_QUERY).put("variables", vars).toString())
+            val pageObj = json.getJSONObject("data").getJSONObject("Page")
+            val arr = pageObj.getJSONArray("media")
+            for (i in 0 until arr.length()) {
+                val m = arr.getJSONObject(i)
+                val anime = parseMedia(m) ?: continue
+                val total = m.optInt("episodes", 0)
+                val next = m.optJSONObject("nextAiringEpisode")?.optInt("episode", 0) ?: 0
+                val aired = when (m.optString("status")) {
+                    "NOT_YET_RELEASED" -> 0
+                    "FINISHED" -> total
+                    else -> if (next > 0) next - 1 else total
+                }
+                val score = m.optInt("averageScore", 0)
+                val badge = when {
+                    aired <= 0 -> "Em breve"
+                    score > 0 -> String.format(java.util.Locale("pt", "BR"), "★ %.1f", score / 10.0)
+                    else -> ""
+                }
+                out += Airing(anime, aired, 0L, badge = badge)
+            }
+            if (!pageObj.getJSONObject("pageInfo").optBoolean("hasNextPage")) break
+            page++
+            Thread.sleep(400)
+        }
+        return out
     }
 
     /** Temporada anterior: o anime e quantos episódios ela teve. */
