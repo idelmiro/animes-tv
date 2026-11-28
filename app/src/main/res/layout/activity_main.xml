@@ -59,6 +59,12 @@
             android:text="▶" />
 
         <Button
+            android:id="@+id/btnMode"
+            style="@style/TvButton"
+            android:layout_marginStart="24dp"
+            android:text="Temporadas" />
+
+        <Button
             android:id="@+id/btnFav"
             style="@style/TvButton"
             android:layout_marginStart="24dp"

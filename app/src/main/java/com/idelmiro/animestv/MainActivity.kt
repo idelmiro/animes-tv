@@ -106,7 +106,7 @@ class MainActivity : Activity() {
         weekLabel = findViewById(R.id.weekLabel)
         btnFav = findViewById(R.id.btnFav)
 
-        adapter = AnimeAdapter(prefs) { onAnimeClick(it) }
+        adapter = AnimeAdapter(prefs) { if (seasonMode) onSeasonAnimeClick(it) else onAnimeClick(it) }
         val grid = findViewById<RecyclerView>(R.id.grid)
         grid.layoutManager = GridLayoutManager(this, 6)
         grid.adapter = adapter
@@ -115,8 +115,10 @@ class MainActivity : Activity() {
 
         findViewById<Button>(R.id.btnPrev).setOnClickListener { changeWeek(-1) }
         findViewById<Button>(R.id.btnNext).setOnClickListener { changeWeek(1) }
+        findViewById<Button>(R.id.btnMode).setOnClickListener { toggleMode() }
         findViewById<Button>(R.id.btnRefresh).setOnClickListener {
             cache.clear()
+            seasonCache.clear()
             load()
             HomeWorker.runNow(this)
         }
@@ -286,6 +288,11 @@ class MainActivity : Activity() {
     }
 
     private fun load() {
+        if (seasonMode) {
+            buildSeasonTabs()
+            loadSeason()
+            return
+        }
         weekLabel.text = "${monday.format(dateFmt)} – ${monday.plusDays(6).format(dateFmt)}"
         buildDays()
         if (cache[monday] != null) {
@@ -362,6 +369,10 @@ class MainActivity : Activity() {
     }
 
     private fun updateDays() {
+        if (seasonMode) {
+            updateSeasonTabs()
+            return
+        }
         val favs = prefs.favorites
         val list = weekList()
         val today = LocalDate.now()
@@ -389,6 +400,10 @@ class MainActivity : Activity() {
     // ---------- grade ----------
 
     private fun showDay() {
+        if (seasonMode) {
+            showSeason()
+            return
+        }
         if (cache[monday] == null) return
         val favs = prefs.favorites
         var items = weekList().filter { dayOf(it) == selected }
@@ -401,6 +416,129 @@ class MainActivity : Activity() {
                 else -> "Nenhum anime neste dia."
             }
         )
+    }
+
+    // ---------- temporadas (as 4 últimas) ----------
+
+    private var seasonMode = false
+    private val seasonCache = HashMap<AniList.Season, List<Airing>>()
+    private var selectedSeason = 0
+    private var seasons: List<AniList.Season> = emptyList()
+
+    /** Troca entre a semana (calendário) e as últimas 4 temporadas. */
+    private fun toggleMode() {
+        seasonMode = !seasonMode
+        findViewById<Button>(R.id.btnMode).text = if (seasonMode) "Semana" else "Temporadas"
+        findViewById<TextView>(R.id.titleText).text = if (seasonMode) "Animes das temporadas" else "Animes da semana"
+        val vis = if (seasonMode) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.btnPrev).visibility = vis
+        findViewById<View>(R.id.btnNext).visibility = vis
+        weekLabel.visibility = vis
+        loading?.cancel()
+        if (seasonMode) selectedSeason = 0
+        load()
+    }
+
+    private fun buildSeasonTabs() {
+        // Sempre as 4 últimas, a partir de hoje (em jan/2027: inverno 2027 e as 3 últimas de 2026).
+        seasons = AniList.lastSeasons(LocalDate.now(), 4)
+        if (selectedSeason !in seasons.indices) selectedSeason = 0
+        daysRow.removeAllViews()
+        val inflater = LayoutInflater.from(this)
+        for (i in seasons.indices) {
+            val tv = inflater.inflate(R.layout.item_day, daysRow, false) as TextView
+            tv.setOnFocusChangeListener { _, hasFocus -> if (hasFocus && selectedSeason != i) selectSeason(i) }
+            tv.setOnClickListener { selectSeason(i) }
+            if (isPhone) tv.textSize = 13f
+            daysRow.addView(tv)
+        }
+        updateSeasonTabs()
+        daysRow.getChildAt(selectedSeason)?.let { v -> v.post { v.requestFocus() } }
+    }
+
+    private fun updateSeasonTabs() {
+        val favs = prefs.favorites
+        for (i in 0 until minOf(daysRow.childCount, seasons.size)) {
+            val s = seasons[i]
+            val tv = daysRow.getChildAt(i) as TextView
+            val hasFav = seasonCache[s]?.any { it.anime.id in favs } == true
+            val sb = SpannableStringBuilder("${s.label}\n${if (i == 0) "atual • " else ""}${s.months}\n")
+            val dotStart = sb.length
+            sb.append(if (hasFav) "●" else " ")
+            sb.setSpan(ForegroundColorSpan(0xFFFF4D4D.toInt()), dotStart, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            sb.setSpan(RelativeSizeSpan(0.8f), dotStart, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            tv.text = sb
+            tv.isSelected = i == selectedSeason
+        }
+    }
+
+    private fun selectSeason(i: Int) {
+        selectedSeason = i
+        updateSeasonTabs()
+        loadSeason()
+    }
+
+    private fun loadSeason() {
+        val s = seasons.getOrNull(selectedSeason) ?: return
+        if (seasonCache[s] != null) {
+            showSeason()
+            return
+        }
+        loading?.cancel()
+        adapter.items = emptyList()
+        setStatus("Carregando os animes de ${s.label}…")
+        loading = scope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) { AniList.fetchSeason(s) }
+                seasonCache[s] = list
+                if (seasonMode && seasons.getOrNull(selectedSeason) == s) {
+                    updateSeasonTabs()
+                    showSeason()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                setStatus("Não consegui carregar ${s.label} (${e.message ?: e.javaClass.simpleName}). Aperte Atualizar.")
+            }
+        }
+    }
+
+    private fun showSeason() {
+        val s = seasons.getOrNull(selectedSeason) ?: return
+        val all = seasonCache[s] ?: return
+        val favs = prefs.favorites
+        var items = all.filter { !prefs.onlyCrunchyroll || it.anime.crunchyrollUrl != null }
+        if (prefs.onlyFavorites) items = items.filter { it.anime.id in favs }
+        adapter.items = items
+        setStatus(
+            when {
+                items.isNotEmpty() -> null
+                prefs.onlyFavorites -> "Nenhum favorito em ${s.label}. Aperte \"Só favoritos\" para ver todos."
+                else -> "Nenhum anime em ${s.label}."
+            }
+        )
+    }
+
+    /** Anime na tela de temporadas: Crunchyroll abre a página da série; os outros, os episódios. */
+    private fun onSeasonAnimeClick(a: Airing) {
+        if (a.episode <= 0) {
+            toast("${a.anime.title} ainda não estreou.")
+            return
+        }
+        val cr = a.anime.crunchyrollUrl
+        if (cr == null || prefs.crViaNyaa) {
+            onOtherServiceClick(a)
+            return
+        }
+        val fav = prefs.isFav(a.anime.id)
+        val actions = listOf<Pair<String, () -> Unit>>(
+            "Abrir no Crunchyroll" to { CrunchyrollLauncher.openSeries(this, cr)?.let { toast(it) } },
+            "Episódios (buscar no Nyaa)…" to { chooseEarlierEpisode(a, true) },
+            (if (fav) "Remover dos favoritos" else "Adicionar aos favoritos") to { toggleFav(a) }
+        )
+        dialog().setTitle("${a.anime.title} — ${a.episode} episódio(s)")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
     }
 
     private fun setStatus(text: String?) {
@@ -1055,9 +1193,11 @@ class AnimeAdapter(
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         val a = items[position]
-        holder.time.text = Instant.ofEpochMilli(a.releaseMillis(prefs.offsetMinutes))
+        holder.time.text = a.badge ?: Instant.ofEpochMilli(a.releaseMillis(prefs.offsetMinutes))
             .atZone(ZoneId.systemDefault()).format(timeFmt)
+        holder.time.visibility = if (holder.time.text.isNullOrEmpty()) View.INVISIBLE else View.VISIBLE
         holder.ep.text = a.episode.toString()
+        holder.ep.visibility = if (a.episode > 0) View.VISIBLE else View.INVISIBLE
         holder.heart.visibility = if (prefs.isFav(a.anime.id)) View.VISIBLE else View.GONE
         holder.title.text = a.anime.title
         val svc = a.anime.serviceLabel
