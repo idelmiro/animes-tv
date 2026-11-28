@@ -708,7 +708,9 @@ class MainActivity : Activity() {
 
     private fun showDownloads() {
         val ok = Downloads.available(this)
-        val msg = "Local: ${Downloads.locationName(this)}\nLimite: ${Downloads.capLabel(this)}\n" +
+        val mode = if (!Downloads.usesExternal(this)) "" else if (prefs.downloadDirect)
+            "Modo: direto no disco (SSD)\n" else "Modo: memória interna primeiro, depois o disco (HD/pendrive)\n"
+        val msg = "Local: ${Downloads.locationName(this)}\nLimite: ${Downloads.capLabel(this)}\n" + mode +
             (if (ok) "Ocupado agora: ${Downloads.human(Downloads.used(this))} em ${Downloads.count(this)} episódio(s)."
             else "O pendrive escolhido não está conectado.") +
             "\n\nQuando um novo download não cabe no limite, os episódios usados há mais tempo são apagados primeiro."
@@ -760,6 +762,19 @@ class MainActivity : Activity() {
                 Downloads.makeRoom(this, 0, java.io.File(""))
                 d.dismiss()
                 toast("Downloads em ${v.name}, até ${options[which]} GB.")
+                if (v.removable) chooseMode()
+            }.show()
+    }
+
+    /** Disco externo: baixar direto nele (SSD) ou na memória interna primeiro (HD/pendrive). */
+    private fun chooseMode() {
+        val labels = arrayOf(
+            "HD ou pendrive: baixa na memória interna da TV e move para o disco quando termina",
+            "SSD: baixa direto no disco (não usa a memória interna)")
+        dialog().setTitle("Que tipo de disco é?")
+            .setSingleChoiceItems(labels, if (prefs.downloadDirect) 1 else 0) { d, which ->
+                prefs.downloadDirect = which == 1
+                d.dismiss()
             }.show()
     }
 
