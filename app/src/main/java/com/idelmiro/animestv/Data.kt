@@ -17,7 +17,11 @@ data class Anime(
     /** Links de streaming que não são do Crunchyroll (Netflix, Disney+...). */
     val streams: List<Stream> = emptyList(),
     /** Número da temporada, quando se sabe por fora do nome (ex.: a anterior de "Season 2" é a 1). */
-    val seasonHint: Int? = null
+    val seasonHint: Int? = null,
+    /** Código do trailer no YouTube (do AniList), se houver. */
+    val trailer: String? = null,
+    /** Capa maior (para o destaque da tela inicial). */
+    val coverXl: String? = null
 ) {
     /** Nome curto do serviço para o selo do card. */
     val serviceLabel: String?
@@ -235,6 +239,7 @@ object AniList {
               coverImage { large }
               bannerImage
               externalLinks { site url type }
+              trailer { id site }
             }
           }
         }
@@ -275,6 +280,116 @@ object AniList {
             Thread.sleep(400)
         }
         return out
+    }
+
+    // ---------- tela inicial e busca ----------
+
+    /** Um anime com o que a tela inicial e a busca mostram. */
+    data class Show(
+        val anime: Anime,
+        /** Episódios que já saíram (0 = ainda não estreou). */
+        val aired: Int,
+        val total: Int,
+        /** Nota de 0 a 100 (0 = sem nota). */
+        val score: Int,
+        val genres: List<String>,
+        val description: String?,
+        /** "Outono 2026" etc. */
+        val season: String?,
+        /** TV, MOVIE, ONA… */
+        val format: String?,
+        val status: String,
+        val nextEpisode: Int,
+        /** Quando sai o próximo episódio no Japão (segundos), 0 = não se sabe. */
+        val nextAiringAt: Long,
+        val startMonth: Int,
+        val startDay: Int
+    ) {
+        fun toAiring(): Airing = Airing(anime, aired, 0L, badge = scoreLabel ?: if (aired <= 0) "Em breve" else "")
+        val scoreLabel: String? get() = if (score > 0) String.format(java.util.Locale("pt", "BR"), "★ %.1f", score / 10.0) else null
+    }
+
+    private val MEDIA_FIELDS = """
+        id isAdult episodes status averageScore format season seasonYear genres
+        description(asHtml: false)
+        startDate { month day }
+        nextAiringEpisode { episode airingAt }
+        trailer { id site }
+        title { romaji english }
+        synonyms
+        coverImage { large extraLarge }
+        bannerImage
+        externalLinks { site url type }
+    """
+
+    private fun parseShow(m: JSONObject): Show? {
+        val anime = parseMedia(m) ?: return null
+        val total = m.optInt("episodes", 0)
+        val nextObj = m.optJSONObject("nextAiringEpisode")
+        val next = nextObj?.optInt("episode", 0) ?: 0
+        val status = m.optString("status")
+        val aired = when (status) {
+            "NOT_YET_RELEASED" -> 0
+            "FINISHED" -> maxOf(total, 1)
+            else -> if (next > 0) next - 1 else total
+        }
+        val genres = m.optJSONArray("genres")?.let { a -> List(a.length()) { a.optString(it) } } ?: emptyList()
+        val desc = m.str("description")?.replace(Regex("<[^>]+>"), "")?.replace(Regex("\\s+"), " ")?.trim()
+        val seasonName = m.str("season")
+        val year = m.optInt("seasonYear", 0)
+        val season = if (seasonName != null && year > 0 && seasonName in Season.NAMES) Season(seasonName, year).label else null
+        val start = m.optJSONObject("startDate")
+        return Show(anime, aired, total, m.optInt("averageScore", 0), genres, desc, season, m.str("format"), status,
+            next, nextObj?.optLong("airingAt", 0L) ?: 0L, start?.optInt("month", 0) ?: 0, start?.optInt("day", 0) ?: 0)
+    }
+
+    private fun page(query: String, vars: JSONObject): JSONArray {
+        val json = post(JSONObject().put("query", query).put("variables", vars).toString())
+        return json.getJSONObject("data").getJSONObject("Page").getJSONArray("media")
+    }
+
+    private fun shows(arr: JSONArray): List<Show> = (0 until arr.length()).mapNotNull { parseShow(arr.getJSONObject(it)) }
+
+    /** Os animes em alta agora no AniList (o destaque da tela inicial). */
+    fun fetchTrending(n: Int = 10): List<Show> = shows(page("""
+        query (#n: Int) { Page(page: 1, perPage: #n) {
+          media(type: ANIME, isAdult: false, sort: TRENDING_DESC) { $MEDIA_FIELDS }
+        } }
+    """.replace('#', '$'), JSONObject().put("n", n)))
+
+    /** Vários animes de uma vez, pelo código do AniList. */
+    fun fetchByIds(ids: Collection<Int>): List<Show> {
+        if (ids.isEmpty()) return emptyList()
+        val out = ArrayList<Show>()
+        for (chunk in ids.distinct().chunked(50)) {
+            out += shows(page("""
+                query (#ids: [Int]) { Page(page: 1, perPage: 50) {
+                  media(id_in: #ids, type: ANIME) { $MEDIA_FIELDS }
+                } }
+            """.replace('#', '$'), JSONObject().put("ids", JSONArray(chunk))))
+        }
+        return out
+    }
+
+    /** Os animes mais populares de uma temporada (com tudo o que a tela inicial mostra). */
+    fun fetchSeasonShows(s: Season, n: Int = 20): List<Show> = shows(page("""
+        query (#season: MediaSeason, #year: Int, #n: Int) { Page(page: 1, perPage: #n) {
+          media(season: #season, seasonYear: #year, type: ANIME, isAdult: false,
+                format_in: [TV, TV_SHORT, ONA], sort: POPULARITY_DESC) { $MEDIA_FIELDS }
+        } }
+    """.replace('#', '$'), JSONObject().put("season", s.name).put("year", s.year).put("n", n)))
+
+    /** Busca pelo nome (japonês ou inglês), do mais parecido para o menos. */
+    fun search(text: String): List<Show> = shows(page("""
+        query (#q: String) { Page(page: 1, perPage: 30) {
+          media(search: #q, type: ANIME, isAdult: false, sort: [SEARCH_MATCH, POPULARITY_DESC]) { $MEDIA_FIELDS }
+        } }
+    """.replace('#', '$'), JSONObject().put("q", text)))
+
+    /** A temporada seguinte a [s]. */
+    fun nextSeason(s: Season): Season {
+        val i = Season.NAMES.indexOf(s.name)
+        return if (i == 3) Season(Season.NAMES[0], s.year + 1) else Season(Season.NAMES[i + 1], s.year)
     }
 
     /** Temporada anterior: o anime e quantos episódios ela teve. */
@@ -328,6 +443,8 @@ object AniList {
         val t = media.optJSONObject("title")
         val title = t?.str("romaji") ?: t?.str("english") ?: return null
         val cover = media.optJSONObject("coverImage")?.str("large")
+        val coverXl = media.optJSONObject("coverImage")?.str("extraLarge")
+        val trailer = media.optJSONObject("trailer")?.takeIf { it.optString("site").equals("youtube", true) }?.str("id")
         var cr: String? = null
         val streams = ArrayList<Stream>()
         val links: JSONArray? = media.optJSONArray("externalLinks")
@@ -349,7 +466,8 @@ object AniList {
             for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { alt.add(it) }
         }
         alt.remove(title)
-        return Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage"), alt.toList(), streams)
+        return Anime(media.getInt("id"), title, cover, cr, media.str("bannerImage"), alt.toList(), streams,
+            trailer = trailer, coverXl = coverXl)
     }
 
     private fun post(body: String): JSONObject {

@@ -41,6 +41,11 @@
             android:orientation="horizontal">
 
         <Button
+            android:id="@+id/btnMenu"
+            style="@style/TvButton"
+            android:text="☰ Menu" />
+
+        <Button
             android:id="@+id/btnPrev"
             style="@style/TvButton"
             android:text="◀" />
