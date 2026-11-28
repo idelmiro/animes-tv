@@ -29,6 +29,10 @@ class TrailerActivity : Activity() {
     private var id = ""
     private val ui = Handler(Looper.getMainLooper())
 
+    override fun attachBaseContext(newBase: android.content.Context) {
+        super.attachBaseContext(TvScale.wrap(newBase))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

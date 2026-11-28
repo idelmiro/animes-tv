@@ -220,7 +220,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
         else "Não há outros episódios salvos para apagar."
         var answered = false
         val reply = { yes: Boolean -> if (!answered) { answered = true; answer(yes) } }
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        TvDialog(this)
             .setTitle("Arquivo maior que ${Downloads.capLabel(this)}")
             .setMessage("Este episódio tem ${Downloads.human(size)}, acima do limite de ${Downloads.capLabel(this)}.\n\n$saved\n\nBaixar mesmo assim?")
             .setPositiveButton("Baixar mesmo assim") { _, _ -> reply(true) }
@@ -261,7 +261,7 @@ class PlayerActivity : Activity(), MPVLib.EventObserver, MPVLib.LogObserver, Sur
     /** O vídeo está engasgando: oferece o modo leve e reabre no mesmo ponto. */
     private fun suggestLighterMode(lost: Int) {
         suggested = true
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        TvDialog(this)
             .setTitle("O vídeo está travando")
             .setMessage("Nos últimos 15 segundos a TV perdeu $lost de 360 quadros.\n\n" +
                 "O modo leve manda o vídeo direto do decodificador para a tela, sem passar pela placa de vídeo. " +

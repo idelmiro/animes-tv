@@ -45,7 +45,7 @@ private const val MUTED = 0xFF9AA4B0.toInt()
 /** Medidas pensadas para a TV (960 dp de largura); no celular tudo encolhe junto. */
 internal class Ui(private val act: MainActivity) {
     private val dm = act.resources.displayMetrics
-    val f = (act.resources.configuration.screenWidthDp / 960f).coerceIn(0.55f, 1.4f)
+    val f = (act.resources.configuration.screenWidthDp / 960f).coerceIn(0.55f, 1f)
     fun dp(v: Float) = (v * f * dm.density).toInt()
     fun dp(v: Int) = dp(v.toFloat())
     fun sp(v: Float) = v * f
@@ -120,7 +120,7 @@ internal class HomeView(private val act: MainActivity) {
     private val hero = FrameLayout(act)
     private val heroImg = ImageView(act).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
     private val heroLabel = ui.text(15f, ACCENT, true)
-    private val heroTitle = ui.text(40f, Color.WHITE, true, 2)
+    private val heroTitle = ui.text(36f, Color.WHITE, true, 2)
     private val heroMeta = ui.text(16f, 0xFFE6E9EE.toInt(), true)
     private val heroDesc = ui.text(15f, 0xFFB9C2CC.toInt(), false, 2)
     private val heroAvail = ui.text(15f, Color.WHITE, true)
@@ -641,8 +641,11 @@ internal class SearchView(private val act: MainActivity) {
         top.addView(field, LinearLayout.LayoutParams(0, ui.dp(52), 1f))
         view.addView(top)
         view.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(14); bottomMargin = ui.dp(6) })
+        val cols = if (Device.isTv(act)) 7 else 3
+        val d = act.resources.displayMetrics.density
+        adapter.posterHeight = (((act.resources.configuration.screenWidthDp - 80) * d / cols - 18 * d) * 1.42f).toInt()
         val grid = RecyclerView(act).apply {
-            layoutManager = GridLayoutManager(act, if (Device.isTv(act)) 6 else 3)
+            layoutManager = GridLayoutManager(act, cols)
             adapter = this@SearchView.adapter
             clipToPadding = false
             setPadding(0, 0, 0, ui.dp(30))

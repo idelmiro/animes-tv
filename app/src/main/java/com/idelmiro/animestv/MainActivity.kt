@@ -58,7 +58,7 @@ class MainActivity : Activity() {
     internal var loadError: String? = null
     internal val ui = Handler(Looper.getMainLooper())
     /** Janela "Abrindo no Amnis…" e o aviso de demora, enquanto o Amnis não assume a tela. */
-    internal var launchWatch: Pair<AlertDialog, Runnable>? = null
+    internal var launchWatch: Pair<android.app.Dialog, Runnable>? = null
 
     // Teste guiado de formas de abrir o Crunchyroll. Fica salvo nas preferências porque
     // o Android pode fechar este app enquanto o Crunchyroll toca o vídeo.
@@ -97,6 +97,10 @@ class MainActivity : Activity() {
     internal val dayNames = arrayOf("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
     internal val dateFmt = DateTimeFormatter.ofPattern("dd/MM")
 
+    override fun attachBaseContext(newBase: android.content.Context) {
+        super.attachBaseContext(TvScale.wrap(newBase))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -125,19 +129,23 @@ class MainActivity : Activity() {
         grid.adapter = adapter
         isPhone = !Device.isTv(this)
         if (isPhone) adaptForPhone(grid)
+        else {
+            // TV: 7 colunas, capas na proporção certa.
+            val d = resources.displayMetrics.density
+            val widthDp = resources.configuration.screenWidthDp - 96
+            grid.layoutManager = GridLayoutManager(this, 7)
+            adapter.posterHeight = ((widthDp * d / 7) - 18 * d).let { (it * 1.42f).toInt() }
+        }
 
         findViewById<Button>(R.id.btnMenu).setOnClickListener { openMenu() }
         findViewById<Button>(R.id.btnPrev).setOnClickListener { changeWeek(-1) }
         findViewById<Button>(R.id.btnNext).setOnClickListener { changeWeek(1) }
-        findViewById<Button>(R.id.btnMode).setOnClickListener { toggleMode() }
         findViewById<Button>(R.id.btnRefresh).setOnClickListener {
             cache.clear()
             seasonCache.clear()
             load()
             HomeWorker.runNow(this)
         }
-        findViewById<Button>(R.id.btnSettings).setOnClickListener { openSettings() }
-        findViewById<Button>(R.id.btnDownloads).setOnClickListener { showSaved() }
         btnFav.setOnClickListener {
             prefs.onlyFavorites = !prefs.onlyFavorites
             updateFavButton()
@@ -551,8 +559,7 @@ class MainActivity : Activity() {
 
     internal fun applySeasonMode(on: Boolean) {
         seasonMode = on
-        findViewById<Button>(R.id.btnMode).text = if (seasonMode) "Semana" else "Temporadas"
-        findViewById<TextView>(R.id.titleText).text = if (seasonMode) "Animes das temporadas" else "Animes da semana"
+        findViewById<TextView>(R.id.titleText).text = if (seasonMode) "Temporadas" else "Semana"
         val vis = if (seasonMode) View.GONE else View.VISIBLE
         findViewById<View>(R.id.btnPrev).visibility = vis
         findViewById<View>(R.id.btnNext).visibility = vis
@@ -850,7 +857,7 @@ class MainActivity : Activity() {
     }
 
     /** Janela com indicador girando e um texto que é atualizado com a etapa real. */
-    internal class Progress(val dialog: AlertDialog, val text: TextView)
+    internal class Progress(val dialog: android.app.Dialog, val text: TextView)
 
     internal fun progressDialog(title: String, message: String, onCancel: (() -> Unit)?): Progress {
         val pad = (24 * resources.displayMetrics.density).toInt()
@@ -861,6 +868,7 @@ class MainActivity : Activity() {
         box.addView(ProgressBar(this).apply { isIndeterminate = true })
         val text = TextView(this).apply {
             setPadding(pad, 0, 0, 0)
+            setTextColor(0xFFC9D1D9.toInt())
             textSize = 16f
             this.text = message
         }
@@ -1273,7 +1281,7 @@ class MainActivity : Activity() {
         }
     }
 
-    internal fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+    internal fun dialog() = TvDialog(this)
 
     internal fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }
