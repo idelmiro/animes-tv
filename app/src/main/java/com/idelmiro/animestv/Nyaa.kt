@@ -31,10 +31,14 @@ object Nyaa {
         "udp://tracker.torrent.eu.org:451/announce",
     )
 
+    /** PT-BR; "Portuguese" sozinho vale, mas "Portuguese (European)" não. */
     private val PTBR_RE = Regex(
-        """pt[-_ .]?br|portugu[eê]s|portuguese|legendado|\[pt]""",
+        """pt[-_ .]?br|por[-_ ]?br|brazil|brasil|legendado|\[pt]|portugu(?:ese|[eê]s)(?![a-z])(?![\s*_(\[]*(?:european|europeu|portugal|pt[-_]?pt))""",
         RegexOption.IGNORE_CASE
     )
+    /** Lançamentos com várias legendas (costumam ficar na categoria em inglês e trazer PT-BR). */
+    private val MULTI = Regex("""multi[-_ .]?subs?|multiple[-_ .]subtitles?|multi(?![a-z])""", RegexOption.IGNORE_CASE)
+    private const val MAX_MULTI_CHECKS = 4
     private const val PTBR_QUERY = "(pt-br|ptbr|legendado|portuguese|portugues)"
 
     private val DUB = Regex(
@@ -127,6 +131,28 @@ object Nyaa {
                     when {
                         lang.inPage.containsMatchIn(desc) -> found[it.infoHash] = it.toResult("descrição", batch)
                         lang.inPage.containsMatchIn(files) -> found[it.infoHash] = it.toResult("arquivos", batch)
+                    }
+                }
+                // 3) PT-BR: lançamentos multi-legenda ficam na categoria em inglês (1_2), com o
+                //    português só na descrição ("Portuguese (Brazilian)").
+                if (lang == Lang.PTBR && found.values.count { !it.batch } < 3) {
+                    Thread.sleep(PAUSE_MS)
+                    status("Buscando lançamentos com várias legendas de \"$name\"$which…")
+                    var multiChecks = 0
+                    for (it in rss(name, "1_2")) {
+                        if (it.infoHash in found) continue
+                        val batch = matchEpisode(it.title, episode) ?: continue
+                        if (PTBR_RE.containsMatchIn(it.title)) {
+                            found[it.infoHash] = it.toResult("título", batch)
+                            continue
+                        }
+                        if (!MULTI.containsMatchIn(it.title) || multiChecks >= MAX_MULTI_CHECKS) continue
+                        multiChecks++
+                        status("Conferindo se tem legenda PT-BR ($multiChecks de no máximo $MAX_MULTI_CHECKS)…\n${it.title}")
+                        Thread.sleep(PAUSE_MS)
+                        val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { continue }
+                        if (PTBR_RE.containsMatchIn(desc) || PTBR_RE.containsMatchIn(files))
+                            found[it.infoHash] = it.toResult("descrição", batch)
                     }
                 }
             } catch (e: InterruptedException) {
