@@ -446,7 +446,7 @@ class MainActivity : Activity() {
     internal fun toggleMode() {
         if (!seasonMode) selectedSeason = 0
         screen = if (seasonMode) Screen.WEEK else Screen.SEASONS
-        setSeasonMode(!seasonMode)
+        applySeasonMode(!seasonMode)
     }
 
     // ---------- telas: início, semana, temporadas, busca ----------
@@ -467,8 +467,8 @@ class MainActivity : Activity() {
         when (s) {
             Screen.HOME -> { home.refreshLocal(); home.focusStart() }
             Screen.SEARCH -> searchView.focus()
-            Screen.WEEK -> setSeasonMode(false)
-            Screen.SEASONS -> setSeasonMode(true)
+            Screen.WEEK -> applySeasonMode(false)
+            Screen.SEASONS -> applySeasonMode(true)
         }
     }
 
@@ -549,7 +549,7 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(event)
     }
 
-    internal fun setSeasonMode(on: Boolean) {
+    internal fun applySeasonMode(on: Boolean) {
         seasonMode = on
         findViewById<Button>(R.id.btnMode).text = if (seasonMode) "Semana" else "Temporadas"
         findViewById<TextView>(R.id.titleText).text = if (seasonMode) "Animes das temporadas" else "Animes da semana"
