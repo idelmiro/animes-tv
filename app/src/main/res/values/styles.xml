@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#0D0F14</color>
+    <color name="bg">#2B2B2E</color>
     <color name="orange">#F47521</color>
 
     <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">

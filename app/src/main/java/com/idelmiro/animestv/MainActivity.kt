@@ -130,11 +130,11 @@ class MainActivity : Activity() {
         isPhone = !Device.isTv(this)
         if (isPhone) adaptForPhone(grid)
         else {
-            // TV: 7 colunas, capas na proporção certa.
+            // TV: 6 colunas (como as linhas da tela inicial), capas na proporção certa.
             val d = resources.displayMetrics.density
             val widthDp = resources.configuration.screenWidthDp - 96
-            grid.layoutManager = GridLayoutManager(this, 7)
-            adapter.posterHeight = ((widthDp * d / 7) - 18 * d).let { (it * 1.42f).toInt() }
+            grid.layoutManager = GridLayoutManager(this, 6)
+            adapter.posterHeight = ((widthDp * d / 6) - 18 * d).let { (it * 1.42f).toInt() }
         }
 
         findViewById<Button>(R.id.btnMenu).setOnClickListener { openMenu() }
@@ -496,6 +496,14 @@ class MainActivity : Activity() {
     internal fun openMenu() {
         lastFocus = currentFocus
         sideMenu.show(screen)
+    }
+
+    /** Menu aberto: as telas de trás não recebem o foco. */
+    internal fun blockBackground(block: Boolean) {
+        val mode = if (block) ViewGroup.FOCUS_BLOCK_DESCENDANTS else ViewGroup.FOCUS_AFTER_DESCENDANTS
+        (findViewById<View>(R.id.root) as ViewGroup).descendantFocusability = mode
+        (home.view as ViewGroup).descendantFocusability = mode
+        (searchView.view as ViewGroup).descendantFocusability = mode
     }
 
     internal fun restoreFocus() {
@@ -1314,6 +1322,8 @@ class AnimeAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val v = LayoutInflater.from(parent.context).inflate(R.layout.item_anime, parent, false)
         if (posterHeight > 0) v.findViewById<ImageView>(R.id.poster).layoutParams.height = posterHeight
+        // Cantos arredondados também na imagem (não só no fundo).
+        v.findViewById<View>(R.id.posterBox).clipToOutline = true
         v.setOnFocusChangeListener { view, hasFocus ->
             val s = if (hasFocus) 1.08f else 1f
             view.animate().scaleX(s).scaleY(s).setDuration(120).start()
