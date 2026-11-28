@@ -245,9 +245,9 @@ object Downloads {
     }
 
     /** Guarda de qual anime/episódio é o download, para achar depois sem buscar no Nyaa. */
-    fun writeInfo(dir: File, animeId: Int, title: String, episode: Int, release: String, size: Long, magnet: String) =
+    fun writeInfo(dir: File, animeId: Int, title: String, episode: Int, release: String, size: Long, magnet: String, dub: Boolean) =
         updateInfo(dir, "animeId" to animeId, "title" to title, "episode" to episode,
-            "release" to release, "size" to size, "magnet" to magnet)
+            "release" to release, "size" to size, "magnet" to magnet, "dub" to dub)
 
     /** Ponto em que parou de assistir (segundos; 0 = do começo). */
     fun savePosition(dir: File, seconds: Long) = updateInfo(dir, "pos" to seconds)
@@ -264,7 +264,9 @@ object Downloads {
         /** Onde parou de assistir, em segundos. */
         val pos: Long,
         /** Porcentagem baixada (só faz sentido se incompleto). */
-        val percent: Int
+        val percent: Int,
+        /** Versão dublada em inglês (o player escolhe o áudio em inglês). */
+        val dub: Boolean = false
     ) {
         val complete get() = video != null
     }
@@ -283,7 +285,7 @@ object Downloads {
             try {
                 Saved(d, v, o.getInt("animeId"), o.getInt("episode"), o.optString("release", v?.name ?: ""),
                     o.optLong("size", v?.length() ?: 0L), magnet, o.optLong("pos", 0L),
-                    if (v != null) 100 else o.optInt("percent", 0))
+                    if (v != null) 100 else o.optInt("percent", 0), o.optBoolean("dub", false))
             } catch (_: Throwable) { null }
         }
     }
@@ -348,6 +350,8 @@ class TorrentStream(
      * Recebe o tamanho, quantos episódios estão salvos e quanto ocupam; chame answer(true/false).
      */
     private val onOversize: (size: Long, savedCount: Int, savedBytes: Long, answer: (Boolean) -> Unit) -> Unit,
+    /** Versão dublada em inglês (fica anotado no download). */
+    private val dub: Boolean = false,
 ) {
     enum class Phase { METADATA, SPACE, CONNECTING, DOWNLOADING, COMPLETE, ERROR }
 
@@ -556,7 +560,7 @@ class TorrentStream(
             Downloads.inUse.add(d.absolutePath)
             val fs = ti.files()
             d.mkdirs()
-            Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize, magnet)
+            Downloads.writeInfo(d, animeId, animeTitle, episode, release, fileSize, magnet, dub)
             val meta = Downloads.metaFile(d)
             if (meta.length() == 0L) Downloads.writeAtomic(meta, data)
             val resume = Downloads.resumeFile(d).takeIf { it.length() > 0 }

@@ -517,7 +517,7 @@ class MainActivity : Activity() {
         }
         val actions = ArrayList<Pair<String, () -> Unit>>()
         for (sv in saved) {
-            val info = "${Downloads.human(sv.size)} • ${sv.release}"
+            val info = "${Downloads.human(sv.size)}${if (sv.dub) " • dublado em inglês" else ""} • ${sv.release}"
             if (sv.complete) {
                 if (sv.pos > 30) {
                     actions += "▶ Continuar de ${clock(sv.pos)}\n$info" to { playSaved(a, episode, sv, sv.pos) }
@@ -550,6 +550,7 @@ class MainActivity : Activity() {
             .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
             .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
+            .putExtra(PlayerActivity.EXTRA_DUB, sv.dub)
             .putExtra(PlayerActivity.EXTRA_START, start))
     }
 
@@ -561,23 +562,31 @@ class MainActivity : Activity() {
             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
             .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
             .putExtra(PlayerActivity.EXTRA_RELEASE, sv.release)
+            .putExtra(PlayerActivity.EXTRA_DUB, sv.dub)
             .putExtra(PlayerActivity.EXTRA_START, if (sv.pos > 30) sv.pos else 0L))
     }
 
-    private fun searchNyaaNow(a: Airing, episode: Int) {
+    private fun searchNyaaNow(a: Airing, episode: Int, lang: Nyaa.Lang = Nyaa.Lang.PTBR) {
         var job: Job? = null
-        val prog = progressDialog("${a.anime.title} — Ep. $episode", "Preparando a busca…") { job?.cancel() }
+        val dubbed = lang == Nyaa.Lang.EN_DUB
+        val heading = "${a.anime.title} — Ep. $episode" + if (dubbed) " (dublado em inglês)" else ""
+        val prog = progressDialog(heading, "Preparando a busca…") { job?.cancel() }
         job = scope.launch {
             try {
                 val names = listOf(a.anime.title) + a.anime.altTitles
                 val results = runInterruptible(Dispatchers.IO) {
-                    Nyaa.search(names, episode) { msg -> ui.post { prog.text.text = msg } }
+                    Nyaa.search(names, episode, lang) { msg -> ui.post { prog.text.text = msg } }
                 }
                 prog.dialog.dismiss()
                 if (results.isEmpty()) {
-                    val b = dialog().setTitle("Sem legenda PT-BR")
+                    val b = if (!dubbed) dialog().setTitle("Sem legenda PT-BR")
                         .setMessage("Não encontrei o episódio $episode de \"${a.anime.title}\" com legenda em português. " +
-                            "As legendas dependem dos fansubs e podem demorar; tente de novo mais tarde.")
+                            "As legendas dependem dos fansubs e podem demorar; tente de novo mais tarde.\n\n" +
+                            "Se quiser, posso procurar o mesmo episódio dublado em inglês.")
+                        .setPositiveButton("Buscar dublado em inglês") { _, _ -> searchNyaaNow(a, episode, Nyaa.Lang.EN_DUB) }
+                    else dialog().setTitle("Sem versão dublada")
+                        .setMessage("Também não encontrei o episódio $episode de \"${a.anime.title}\" dublado em inglês. " +
+                            "Nem todo anime ganha dublagem, e ela costuma sair semanas depois do episódio original.")
                         .setPositiveButton("OK", null)
                     if (a.episode > 1) b.setNegativeButton("Outro episódio") { _, _ -> chooseEarlierEpisode(a) }
                     a.anime.streams.firstOrNull()?.let { st ->
@@ -590,9 +599,9 @@ class MainActivity : Activity() {
                 val labels = shown.map { r ->
                     val kind = if (r.batch) " • pacote" else ""
                     val big = if (!r.batch && tooBig(r.size)) " • maior que ${Downloads.capLabel(this@MainActivity)} (vai pedir confirmação)" else ""
-                    "${r.seeders} seeds • ${r.size}$big • PT-BR no ${r.via}$kind\n${r.title}"
+                    "${r.seeders} seeds • ${r.size}$big • ${lang.short} no ${r.via}$kind\n${r.title}"
                 }.toTypedArray()
-                dialog().setTitle("${a.anime.title} — Ep. $episode")
+                dialog().setTitle(heading)
                     .setItems(labels) { _, which ->
                         val r = shown[which]
                         if (prefs.useAmnis) openInAmnis(r, episode)
@@ -601,7 +610,8 @@ class MainActivity : Activity() {
                             .putExtra(PlayerActivity.EXTRA_TITLE, a.anime.title)
                             .putExtra(PlayerActivity.EXTRA_EPISODE, episode)
                             .putExtra(PlayerActivity.EXTRA_ANIME_ID, a.anime.id)
-                            .putExtra(PlayerActivity.EXTRA_RELEASE, r.title))
+                            .putExtra(PlayerActivity.EXTRA_RELEASE, r.title)
+                            .putExtra(PlayerActivity.EXTRA_DUB, dubbed))
                     }
                     .setNegativeButton("Fechar", null)
                     .show()

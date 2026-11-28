@@ -9,10 +9,11 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * Busca no Nyaa (feed RSS, sem login) o episódio legendado em PT-BR de animes que não
- * estão no Crunchyroll. Critérios: categoria "Anime - Non-English-translated" (1_3),
- * ordenado por seeds, PT-BR confirmado pelo título ou, se não houver, pela descrição
- * ou pela lista de arquivos da página do torrent.
+ * Busca no Nyaa (feed RSS, sem login) o episódio de animes que não estão no Crunchyroll.
+ * Por padrão, legendado em PT-BR: categoria "Anime - Non-English-translated" (1_3).
+ * Se não houver, dá para buscar dublado em inglês: categoria "Anime - English-translated"
+ * (1_2). Sempre ordenado por seeds; o idioma é confirmado pelo título ou, se não houver,
+ * pela descrição ou pela lista de arquivos da página do torrent.
  */
 object Nyaa {
     private const val BASE = "https://nyaa.si/"
@@ -30,11 +31,37 @@ object Nyaa {
         "udp://tracker.torrent.eu.org:451/announce",
     )
 
-    private val PTBR = Regex(
+    private val PTBR_RE = Regex(
         """pt[-_ .]?br|portugu[eê]s|portuguese|legendado|\[pt]""",
         RegexOption.IGNORE_CASE
     )
     private const val PTBR_QUERY = "(pt-br|ptbr|legendado|portuguese|portugues)"
+
+    private val DUB = Regex(
+        """(?<![a-z])(?:eng(?:lish)?[-_ .]?dub(?:bed)?|dub(?:bed)?|dual[-_ .]?audio|multi[-_ .]?audio|english[-_ .]audio)(?![a-z])""",
+        RegexOption.IGNORE_CASE
+    )
+    /** Na descrição: também "Audio: English…" / "English audio". */
+    private val DUB_DESC = Regex(
+        DUB.pattern + """|audio[^\n<]{0,40}english|english[-_ .]?(?:dub|audio)""",
+        RegexOption.IGNORE_CASE
+    )
+    private const val DUB_QUERY = "(dub|dubbed|dual|multi-audio|eng-dub)"
+
+    /** O que procurar: legenda em português ou dublagem em inglês. */
+    enum class Lang(
+        internal val category: String,
+        internal val query: String,
+        internal val inTitle: Regex,
+        internal val inPage: Regex,
+        /** "com legenda PT-BR" / "dublado em inglês" */
+        val label: String,
+        /** Curto, para a lista de resultados. */
+        val short: String
+    ) {
+        PTBR("1_3", PTBR_QUERY, PTBR_RE, PTBR_RE, "com legenda PT-BR", "PT-BR"),
+        EN_DUB("1_2", DUB_QUERY, DUB, DUB_DESC, "dublado em inglês", "Dublado")
+    }
 
     data class Result(
         val title: String,
@@ -58,7 +85,7 @@ object Nyaa {
      * Procura o [episode] do anime pelos [names] (o primeiro é o título principal).
      * Roda em thread de fundo (faz várias consultas de rede).
      */
-    fun search(names: List<String>, episode: Int, progress: (String) -> Unit = {}): List<Result> {
+    fun search(names: List<String>, episode: Int, lang: Lang = Lang.PTBR, progress: (String) -> Unit = {}): List<Result> {
         val queries = names.map { cleanName(it) }.filter { it.length >= 3 && isLatin(it) }.distinct().take(3)
         if (queries.isEmpty()) throw Exception("o anime não tem um nome em letras latinas para buscar")
         val found = LinkedHashMap<String, Result>()
@@ -67,28 +94,28 @@ object Nyaa {
 
         fun status(step: String) {
             val n = found.size
-            progress("$step\n\n" + if (n == 0) "Nenhum lançamento confirmado ainda." else "$n lançamento(s) com PT-BR encontrado(s).")
+            progress("$step\n\n" + if (n == 0) "Nenhum lançamento confirmado ainda." else "$n lançamento(s) ${lang.label} encontrado(s).")
         }
 
         for ((qi, name) in queries.withIndex()) {
             val which = if (queries.size > 1) " (nome ${qi + 1} de ${queries.size})" else ""
             try {
-                // 1) Com termos de PT-BR na busca: o título já confirma o idioma.
-                status("Buscando \"$name\" com legenda PT-BR no Nyaa$which…")
-                val withPt = rss("$name $PTBR_QUERY")
-                for (it in withPt) {
+                // 1) Com os termos do idioma na busca: o título já confirma o idioma.
+                status("Buscando \"$name\" ${lang.label} no Nyaa$which…")
+                val withLang = rss("$name ${lang.query}", lang.category)
+                for (it in withLang) {
                     if (it.infoHash in found) continue
                     val batch = matchEpisode(it.title, episode) ?: continue
-                    if (PTBR.containsMatchIn(it.title)) found[it.infoHash] = it.toResult("título", batch)
+                    if (lang.inTitle.containsMatchIn(it.title)) found[it.infoHash] = it.toResult("título", batch)
                 }
                 // 2) Só com o nome: confere a descrição dos que não dizem o idioma no título.
                 Thread.sleep(PAUSE_MS)
                 status("Buscando outros lançamentos de \"$name\"$which…")
-                val all = rss(name)
+                val all = rss(name, lang.category)
                 for (it in all) {
                     if (it.infoHash in found) continue
                     val batch = matchEpisode(it.title, episode) ?: continue
-                    if (PTBR.containsMatchIn(it.title)) {
+                    if (lang.inTitle.containsMatchIn(it.title)) {
                         found[it.infoHash] = it.toResult("título", batch)
                         continue
                     }
@@ -98,8 +125,8 @@ object Nyaa {
                     Thread.sleep(PAUSE_MS)
                     val (desc, files) = try { page(it.pageUrl) } catch (_: Exception) { continue }
                     when {
-                        PTBR.containsMatchIn(desc) -> found[it.infoHash] = it.toResult("descrição", batch)
-                        PTBR.containsMatchIn(files) -> found[it.infoHash] = it.toResult("arquivos", batch)
+                        lang.inPage.containsMatchIn(desc) -> found[it.infoHash] = it.toResult("descrição", batch)
+                        lang.inPage.containsMatchIn(files) -> found[it.infoHash] = it.toResult("arquivos", batch)
                     }
                 }
             } catch (e: InterruptedException) {
@@ -148,8 +175,8 @@ object Nyaa {
 
     // ---------- rede ----------
 
-    private fun rss(query: String): List<Item> {
-        val url = BASE + "?page=rss&c=1_3&f=0&s=seeders&o=desc&q=" + URLEncoder.encode(query, "UTF-8")
+    private fun rss(query: String, category: String): List<Item> {
+        val url = BASE + "?page=rss&c=$category&f=0&s=seeders&o=desc&q=" + URLEncoder.encode(query, "UTF-8")
         val xml = get(url)
         val out = ArrayList<Item>()
         for (m in Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
